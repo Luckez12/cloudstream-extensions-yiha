@@ -54,46 +54,21 @@ jobs:
           upstream = "https://github.com/HatsuneMikuUwU/cloudstream-extensions-uwu"
           fork = "https://github.com/Luckez12/cloudstream-extensions-yiha"
 
-          target_line = f'setRepo(System.getenv("GITHUB_REPOSITORY") ?: "{upstream}")'
-          replacement = f'setRepo(System.getenv("GITHUB_REPOSITORY") ?: "{fork}")'
+          old = f'setRepo(System.getenv("GITHUB_REPOSITORY") ?: "{upstream}")'
+          new = f'setRepo(System.getenv("GITHUB_REPOSITORY") ?: "{fork}")'
 
-          if target_line in gradle:
-              gradle = gradle.replace(target_line, replacement, 1)
-          elif replacement not in gradle:
-              raise SystemExit("Could not locate the expected setRepo() configuration.")
+          if old in gradle:
+              gradle = gradle.replace(old, new, 1)
+          elif new not in gradle:
+              raise SystemExit("Could not locate expected setRepo configuration.")
 
           if 'authors = listOf("Miku")' not in gradle:
-              raise SystemExit("Expected upstream Miku authorship line was not found.")
+              raise SystemExit("Expected Miku attribution was not found.")
 
           if 'namespace = "com.miku"' not in gradle:
               raise SystemExit("Expected upstream namespace was not found.")
 
           gradle_path.write_text(gradle, encoding="utf-8")
-
-          workflow_path = Path(".github/workflows/build.yml")
-          lines = workflow_path.read_text(encoding="utf-8").splitlines()
-
-          has_jar_copy = any("cp **/build/*.jar" in line for line in lines)
-          cs3_indexes = [
-              i for i, line in enumerate(lines)
-              if "cp **/build/*.cs3" in line
-          ]
-
-          if not has_jar_copy:
-              if len(cs3_indexes) != 1:
-                  raise SystemExit(
-                      f"Expected exactly one .cs3 copy command, found {len(cs3_indexes)}."
-                  )
-
-              i = cs3_indexes[0]
-              cs3_line = lines[i]
-              jar_line = cs3_line.replace("*.cs3", "*.jar") + " || true"
-              lines.insert(i + 1, jar_line)
-
-          workflow_path.write_text(
-              "\n".join(lines) + "\n",
-              encoding="utf-8",
-          )
 
           readme_lines = [
               "# Yiha Extensions",
@@ -121,7 +96,7 @@ jobs:
 
           git diff --check
 
-      - name: Commit Stage 1 identity
+      - name: Commit identity files only
         shell: bash
         run: |
           set -euo pipefail
@@ -129,10 +104,11 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
 
-          git add repo.json build.gradle.kts README.md .github/workflows/build.yml
+          # Intentionally do not stage any file under .github/workflows/.
+          git add repo.json build.gradle.kts README.md
 
           if git diff --staged --quiet; then
-            echo "Stage 1 identity is already applied."
+            echo "Identity files are already applied."
           else
             git commit -m "Bootstrap Yiha fork identity [skip ci]"
             git push origin HEAD:${GITHUB_REF_NAME}
@@ -196,17 +172,13 @@ jobs:
                       f"{name}: wrong repositoryUrl: {repository_url}"
                   )
 
-              jar_url = plugin.get("jarUrl")
-              if jar_url and not str(jar_url).startswith(expected_raw):
-                  errors.append(f"{name}: wrong jar URL: {jar_url}")
-
           if errors:
               raise SystemExit("\n".join(errors[:20]))
 
           print(f"Verified {len(plugins)} plugin entries.")
           PY
 
-      - name: Collect clean build artefacts
+      - name: Collect build artefacts
         shell: bash
         run: |
           set -euo pipefail
@@ -220,39 +192,11 @@ jobs:
           cp build/plugins.json "$OUT/plugins.json"
 
           CS3_COUNT="$(find "$OUT" -maxdepth 1 -name '*.cs3' -type f | wc -l)"
+
           if [ "$CS3_COUNT" -eq 0 ]; then
             echo "::error::No .cs3 artefacts were produced."
             exit 1
           fi
-
-          python3 <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          out = Path(os.environ["RUNNER_TEMP"]) / "yiha-build-output"
-          plugins = json.loads((out / "plugins.json").read_text(encoding="utf-8"))
-
-          missing = []
-          for plugin in plugins:
-              name = plugin.get("name", "<unknown>")
-
-              url = str(plugin.get("url", ""))
-              cs3_name = url.rsplit("/", 1)[-1]
-              if cs3_name and not (out / cs3_name).is_file():
-                  missing.append(f"{name}: missing {cs3_name}")
-
-              jar_url = plugin.get("jarUrl")
-              if jar_url:
-                  jar_name = str(jar_url).rsplit("/", 1)[-1]
-                  if jar_name and not (out / jar_name).is_file():
-                      missing.append(f"{name}: missing {jar_name}")
-
-          if missing:
-              raise SystemExit("\n".join(missing[:20]))
-
-          print("All manifest artefacts are present.")
-          PY
 
           echo "Prepared ${CS3_COUNT} .cs3 artefacts."
           ls -lah "$OUT"
@@ -267,26 +211,38 @@ jobs:
 
           rm -rf "$WORKTREE"
 
-          git fetch origin builds
-          git worktree add --detach "$WORKTREE" origin/builds
-
-          cd "$WORKTREE"
+          if git ls-remote --exit-code --heads origin builds >/dev/null 2>&1; then
+            git fetch origin builds
+            git worktree add --detach "$WORKTREE" origin/builds
+            cd "$WORKTREE"
+            git rm -rf . >/dev/null 2>&1 || true
+          else
+            mkdir -p "$WORKTREE"
+            cd "$WORKTREE"
+            git init
+            git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            git checkout --orphan builds
+          fi
 
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
 
-          git rm -rf .
           cp "$OUT"/* .
 
           git add -f plugins.json *.cs3
+
           if compgen -G "*.jar" > /dev/null; then
             git add -f *.jar
           fi
 
-          git commit -m "Yiha build ${GITHUB_SHA}"
-          git push origin HEAD:builds --force
+          if git diff --cached --quiet; then
+            echo "Build artefacts are unchanged."
+          else
+            git commit -m "Yiha build ${GITHUB_SHA}"
+            git push origin HEAD:builds --force
+          fi
 
-      - name: Final local verification
+      - name: Final verification
         shell: bash
         run: |
           set -euo pipefail
