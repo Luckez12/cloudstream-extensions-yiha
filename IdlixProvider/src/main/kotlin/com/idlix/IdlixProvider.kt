@@ -24,6 +24,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.getQualityFromString
 import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
@@ -42,6 +43,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.Normalizer
 
 class IdlixProvider : MainAPI() {
+    private val cfKiller by lazy { CloudflareKiller() }
+
     override var mainUrl = "https://z2.idlixku.com"
     override var name = "Idlix"
     override val hasMainPage = true
@@ -72,7 +75,7 @@ class IdlixProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val url = if (request.data.contains("%d")) request.data.format(page) else request.data
-        val res = app.get(url, timeout = 10000L).parsedSafe<ApiResponse>() ?: return newHomePageResponse(request.name, emptyList())
+        val res = app.get(url, timeout = 10000L, interceptor = cfKiller).parsedSafe<ApiResponse>() ?: return newHomePageResponse(request.name, emptyList())
         val home = res.data.map { item ->
             val title = item.title ?: "UnKnown"
             val poster = item.posterPath?.let { "https://image.tmdb.org/t/p/w342$it" }
@@ -102,7 +105,7 @@ class IdlixProvider : MainAPI() {
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val url = "$mainUrl/api/search?q=$query&page=$page&limit=8"
-        val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return null
+        val res = app.get(url, interceptor = cfKiller).parsedSafe<SearchApiResponse>() ?: return null
         val items = res.results
         val results = items.mapNotNull { item ->
             val title = item.title ?: "Unknown"
@@ -138,10 +141,10 @@ class IdlixProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val detailApiUrl = url.toIdlixDetailApiUrl()
-        val response = app.get(detailApiUrl, timeout = 10000L, referer = mainUrl)
+        val response = app.get(detailApiUrl, timeout = 10000L, referer = mainUrl, interceptor = cfKiller)
 
         val data = response.parsedSafe<DetailResponse>()
-            ?: throw ErrorLoadingException("Invalid JSON")
+            ?: throw ErrorLoadingException("Idlix API returned a blocked or invalid response")
 
         val title = data.title ?: "Unknown"
         val poster = data.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
@@ -173,7 +176,7 @@ class IdlixProvider : MainAPI() {
         }
 
         val recommendations = try {
-            app.get(relatedUrl, referer = mainUrl)
+            app.get(relatedUrl, referer = mainUrl, interceptor = cfKiller)
                 .parsedSafe<ApiResponse>()?.data?.mapNotNull { item ->
 
                     val recTitle = item.title ?: return@mapNotNull null
@@ -234,7 +237,7 @@ class IdlixProvider : MainAPI() {
                 val seasonUrl = "$mainUrl/api/series/${data.slug}/season/$seasonNum"
 
                 val seasonData = try {
-                    val res = app.get(seasonUrl, referer = mainUrl)
+                    val res = app.get(seasonUrl, referer = mainUrl, interceptor = cfKiller)
                     res.parsedSafe<SeasonWrapper>()?.season
                 } catch (_: Exception) {
                     null
@@ -338,7 +341,8 @@ class IdlixProvider : MainAPI() {
 
         val playResponse = app.get(
             "$mainUrl/api/watch/play-info/$contentType/$contentId",
-            headers = headers
+            headers = headers,
+            interceptor = cfKiller
         )
 
         val cookies = playResponse.cookies
@@ -368,7 +372,8 @@ class IdlixProvider : MainAPI() {
             cookies = cookies,
             requestBody = claimJson.toRequestBody(
                 "application/json".toMediaType()
-            )
+            ),
+            interceptor = cfKiller
         ).parsedSafe<RedeemRes>() ?: return false
 
         val redeemJson = """
@@ -383,7 +388,8 @@ class IdlixProvider : MainAPI() {
             cookies = cookies,
             requestBody = redeemJson.toRequestBody(
                 "application/json".toMediaType()
-            )
+            ),
+            interceptor = cfKiller
         ).parsedSafe<Iframe>() ?: return false
 
         iframeResponse.url

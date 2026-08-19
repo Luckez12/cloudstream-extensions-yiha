@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 3
+version = 4
 
 
 cloudstream {
@@ -7,7 +7,7 @@ cloudstream {
     // All of these properties are optional, you can safely remove them
 
      description = "Idlix — Streaming Movie and TV Series"
-     authors = listOf("Miku")
+     authors = listOf("Miku", "Luckez")
 
     /**
      * Status int as the following:
