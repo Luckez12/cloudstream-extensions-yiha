@@ -1,9 +1,9 @@
 {
-    "name": "Hatsune Repo",
-    "iconUrl": "https://avatars.githubusercontent.com/u/146099520?v=4&size=512",
-    "description": "A curated collection of CloudStream extensions for anime, donghua, movies, and TV series with Indonesian subtitles",
+    "name": "Yiha Extensions",
+    "iconUrl": "https://github.com/Luckez12.png",
+    "description": "CloudStream extensions maintained by Luckez. Forked from HatsuneMikuUwU/cloudstream-extensions-uwu.",
     "manifestVersion": 1,
     "pluginLists": [
-      "https://raw.githubusercontent.com/HatsuneMikuUwU/cloudstream-extensions-uwu/builds/plugins.json"
+        "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/plugins.json"
     ]
 }
