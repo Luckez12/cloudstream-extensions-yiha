@@ -1,0 +1,136 @@
+name: Yiha Replace Ninja With Paw In Provider Files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yiha-provider-emoji-paw
+  cancel-in-progress: false
+
+jobs:
+  patch-build-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Replace ninja with paw in Provider.kt only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          files = sorted(Path(".").rglob("*Provider.kt"))
+          if not files:
+              raise SystemExit("No *Provider.kt files found.")
+
+          pattern = re.compile(
+              r'(^\s*override\s+var\s+name\s*=\s*"[^"\n]*)🥷([^"\n]*")',
+              re.MULTILINE,
+          )
+
+          changed = []
+
+          for path in files:
+              text = path.read_text(encoding="utf-8")
+              new_text, count = pattern.subn(r"\1🐾\2", text)
+
+              if count:
+                  path.write_text(new_text, encoding="utf-8")
+                  changed.append((str(path), count))
+
+          print(f"Scanned {len(files)} *Provider.kt files.")
+          print(f"Changed {len(changed)} files.")
+
+          for path, count in changed:
+              print(f"  {path}: {count} replacement(s)")
+          PY
+
+          git diff --check
+
+          # Safety check: only *Provider.kt files may be modified.
+          BAD="$(git diff --name-only | grep -vE '(^|/)[^/]*Provider\.kt$' || true)"
+          if [ -n "$BAD" ]; then
+            echo "::error::Unexpected modified files:"
+            echo "$BAD"
+            exit 1
+          fi
+
+          git diff -- '*Provider.kt'
+
+      - name: Verify no ninja remains in provider names
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(
+              r'^\s*override\s+var\s+name\s*=\s*"([^"\n]+)"',
+              re.MULTILINE,
+          )
+
+          bad = []
+
+          for path in sorted(Path(".").rglob("*Provider.kt")):
+              text = path.read_text(encoding="utf-8")
+              for name in pattern.findall(text):
+                  if "🥷" in name:
+                      bad.append((str(path), name))
+
+          if bad:
+              lines = "\n".join(f"{p}: {n}" for p, n in bad[:50])
+              raise SystemExit(
+                  "Ninja emoji still exists in provider names:\n" + lines
+              )
+
+          print("No ninja emoji remains in override var name declarations.")
+          PY
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+
+      - name: Build repository
+        env:
+          DUBBINDO_PASSWORD: ${{ secrets.DUBBINDO_PASS }}
+          DUBBINDO_USERNAME: ${{ secrets.DUBBINDO_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew make makePluginsJson
+
+      - name: Commit Provider.kt changes only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          find . -type f -name '*Provider.kt' -print0 | xargs -0 git add --
+
+          if git diff --staged --quiet; then
+            echo "No 🥷 provider names found to replace."
+          else
+            git commit -m "Replace provider ninja emoji with paw"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
