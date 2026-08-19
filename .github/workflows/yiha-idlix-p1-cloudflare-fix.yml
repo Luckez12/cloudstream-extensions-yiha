@@ -1,0 +1,259 @@
+name: Yiha Idlix P1 Cloudflare Fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yiha-idlix-p1-fix
+  cancel-in-progress: false
+
+jobs:
+  patch-build-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Patch Idlix provider
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          provider_path = Path("IdlixProvider/src/main/kotlin/com/idlix/IdlixProvider.kt")
+          build_path = Path("IdlixProvider/build.gradle.kts")
+
+          src = provider_path.read_text(encoding="utf-8")
+          gradle = build_path.read_text(encoding="utf-8")
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count == 0 and new in text:
+                  return text
+              if count != 1:
+                  raise SystemExit(
+                      f"{label}: expected exactly one old pattern, found {count}"
+                  )
+              return text.replace(old, new, 1)
+
+          import_old = "import com.lagradost.cloudstream3.mainPageOf\n"
+          import_new = (
+              "import com.lagradost.cloudstream3.mainPageOf\n"
+              "import com.lagradost.cloudstream3.network.CloudflareKiller\n"
+          )
+          src = replace_once(
+              src, import_old, import_new, "CloudflareKiller import"
+          )
+
+          class_old = (
+              "class IdlixProvider : MainAPI() {\n"
+              '    override var mainUrl = "https://z2.idlixku.com"\n'
+          )
+          class_new = (
+              "class IdlixProvider : MainAPI() {\n"
+              "    private val cfKiller by lazy { CloudflareKiller() }\n"
+              "\n"
+              '    override var mainUrl = "https://z2.idlixku.com"\n'
+          )
+          src = replace_once(
+              src, class_old, class_new, "lazy CloudflareKiller instance"
+          )
+
+          src = replace_once(
+              src,
+              "app.get(url, timeout = 10000L).parsedSafe<ApiResponse>()",
+              "app.get(url, timeout = 10000L, interceptor = cfKiller).parsedSafe<ApiResponse>()",
+              "main page request",
+          )
+
+          src = replace_once(
+              src,
+              "app.get(url).parsedSafe<SearchApiResponse>()",
+              "app.get(url, interceptor = cfKiller).parsedSafe<SearchApiResponse>()",
+              "search request",
+          )
+
+          src = replace_once(
+              src,
+              "app.get(detailApiUrl, timeout = 10000L, referer = mainUrl)",
+              "app.get(detailApiUrl, timeout = 10000L, referer = mainUrl, interceptor = cfKiller)",
+              "detail request",
+          )
+
+          src = replace_once(
+              src,
+              "app.get(relatedUrl, referer = mainUrl)",
+              "app.get(relatedUrl, referer = mainUrl, interceptor = cfKiller)",
+              "related request",
+          )
+
+          src = replace_once(
+              src,
+              "app.get(seasonUrl, referer = mainUrl)",
+              "app.get(seasonUrl, referer = mainUrl, interceptor = cfKiller)",
+              "season request",
+          )
+
+          play_old = (
+              "        val playResponse = app.get(\n"
+              '            "$mainUrl/api/watch/play-info/$contentType/$contentId",\n'
+              "            headers = headers\n"
+              "        )\n"
+          )
+          play_new = (
+              "        val playResponse = app.get(\n"
+              '            "$mainUrl/api/watch/play-info/$contentType/$contentId",\n'
+              "            headers = headers,\n"
+              "            interceptor = cfKiller\n"
+              "        )\n"
+          )
+          src = replace_once(src, play_old, play_new, "play-info request")
+
+          claim_old = (
+              "        val claimApi = app.post(\n"
+              '            "$mainUrl/api/watch/session/claim",\n'
+              "            headers = headers,\n"
+              "            cookies = cookies,\n"
+              "            requestBody = claimJson.toRequestBody(\n"
+              '                "application/json".toMediaType()\n'
+              "            )\n"
+              "        ).parsedSafe<RedeemRes>() ?: return false\n"
+          )
+          claim_new = (
+              "        val claimApi = app.post(\n"
+              '            "$mainUrl/api/watch/session/claim",\n'
+              "            headers = headers,\n"
+              "            cookies = cookies,\n"
+              "            requestBody = claimJson.toRequestBody(\n"
+              '                "application/json".toMediaType()\n'
+              "            ),\n"
+              "            interceptor = cfKiller\n"
+              "        ).parsedSafe<RedeemRes>() ?: return false\n"
+          )
+          src = replace_once(src, claim_old, claim_new, "claim request")
+
+          redeem_old = (
+              "        val iframeResponse = app.post(\n"
+              "            claimApi.redeemUrl,\n"
+              "            headers = headers,\n"
+              "            cookies = cookies,\n"
+              "            requestBody = redeemJson.toRequestBody(\n"
+              '                "application/json".toMediaType()\n'
+              "            )\n"
+              "        ).parsedSafe<Iframe>() ?: return false\n"
+          )
+          redeem_new = (
+              "        val iframeResponse = app.post(\n"
+              "            claimApi.redeemUrl,\n"
+              "            headers = headers,\n"
+              "            cookies = cookies,\n"
+              "            requestBody = redeemJson.toRequestBody(\n"
+              '                "application/json".toMediaType()\n'
+              "            ),\n"
+              "            interceptor = cfKiller\n"
+              "        ).parsedSafe<Iframe>() ?: return false\n"
+          )
+          src = replace_once(src, redeem_old, redeem_new, "redeem request")
+
+          src = replace_once(
+              src,
+              '?: throw ErrorLoadingException("Invalid JSON")',
+              '?: throw ErrorLoadingException("Idlix API returned a blocked or invalid response")',
+              "detail error message",
+          )
+
+          gradle = replace_once(
+              gradle,
+              "version = 3",
+              "version = 4",
+              "Idlix version",
+          )
+          gradle = replace_once(
+              gradle,
+              'authors = listOf("Miku")',
+              'authors = listOf("Miku", "Luckez")',
+              "Idlix authors",
+          )
+
+          provider_path.write_text(src, encoding="utf-8")
+          build_path.write_text(gradle, encoding="utf-8")
+          PY
+
+          git diff --check
+          git diff -- IdlixProvider
+
+      - name: Verify patch invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="IdlixProvider/src/main/kotlin/com/idlix/IdlixProvider.kt"
+          BUILD="IdlixProvider/build.gradle.kts"
+
+          grep -Fq 'import com.lagradost.cloudstream3.network.CloudflareKiller' "$FILE"
+          grep -Fq 'private val cfKiller by lazy { CloudflareKiller() }' "$FILE"
+
+          COUNT="$(grep -o 'interceptor = cfKiller' "$FILE" | wc -l)"
+          if [ "$COUNT" -ne 8 ]; then
+            echo "::error::Expected 8 protected Idlix API calls, found $COUNT."
+            exit 1
+          fi
+
+          grep -Fq 'version = 4' "$BUILD"
+          grep -Fq 'authors = listOf("Miku", "Luckez")' "$BUILD"
+
+          echo "Patch invariants verified."
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+
+      - name: Compile Idlix patch
+        env:
+          DUBBINDO_PASSWORD: ${{ secrets.DUBBINDO_PASS }}
+          DUBBINDO_USERNAME: ${{ secrets.DUBBINDO_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :IdlixProvider:make
+
+      - name: Commit only after successful compile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          git add \
+            IdlixProvider/src/main/kotlin/com/idlix/IdlixProvider.kt \
+            IdlixProvider/build.gradle.kts
+
+          if git diff --staged --quiet; then
+            echo "Idlix P1 patch is already present."
+          else
+            git commit -m "Fix Idlix Cloudflare API requests"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Idlix P1 compiled and was committed successfully."
+          echo "The normal repository build should now rebuild version 4."
