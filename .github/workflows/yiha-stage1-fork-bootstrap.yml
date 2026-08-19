@@ -1,0 +1,242 @@
+name: Yiha Stage 1 Fork Bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yiha-stage1-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Patch fork identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          repo_path = Path("repo.json")
+          repo = json.loads(repo_path.read_text(encoding="utf-8"))
+
+          repo["name"] = "Yiha Extensions"
+          repo["iconUrl"] = "https://github.com/Luckez12.png"
+          repo["description"] = (
+              "CloudStream extensions maintained by Luckez. "
+              "Forked from HatsuneMikuUwU/cloudstream-extensions-uwu."
+          )
+          repo["manifestVersion"] = 1
+          repo["pluginLists"] = [
+              "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/plugins.json"
+          ]
+
+          repo_path.write_text(
+              json.dumps(repo, indent=4, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+
+          gradle_path = Path("build.gradle.kts")
+          gradle = gradle_path.read_text(encoding="utf-8")
+          old_repo = (
+              'setRepo(System.getenv("GITHUB_REPOSITORY") ?: '
+              '"https://github.com/HatsuneMikuUwU/cloudstream-extensions-uwu")'
+          )
+          new_repo = (
+              'setRepo(System.getenv("GITHUB_REPOSITORY") ?: '
+              '"https://github.com/Luckez12/cloudstream-extensions-yiha")'
+          )
+
+          if old_repo in gradle:
+              gradle = gradle.replace(old_repo, new_repo)
+          elif new_repo not in gradle:
+              raise SystemExit("Could not locate the expected setRepo() line.")
+
+          if 'authors = listOf("Miku")' not in gradle:
+              raise SystemExit("Expected upstream Miku authorship line was not found.")
+          if 'namespace = "com.miku"' not in gradle:
+              raise SystemExit("Expected upstream namespace was not found.")
+
+          gradle_path.write_text(gradle, encoding="utf-8")
+
+          workflow_path = Path(".github/workflows/build.yml")
+          build_workflow = workflow_path.read_text(encoding="utf-8")
+
+          jar_copy = '          cp **/build/*.jar ${{ github.workspace }}/builds/ || true\n'
+          cs3_copy = '          cp **/build/*.cs3 ${{ github.workspace }}/builds/\n'
+
+          if jar_copy not in build_workflow:
+              if cs3_copy not in build_workflow:
+                  raise SystemExit("Could not locate the .cs3 copy step in build.yml.")
+              build_workflow = build_workflow.replace(
+                  cs3_copy,
+                  cs3_copy + jar_copy,
+              )
+
+          workflow_path.write_text(build_workflow, encoding="utf-8")
+
+          readme_lines = [
+              "# Yiha Extensions",
+              "",
+              "A maintained fork of `HatsuneMikuUwU/cloudstream-extensions-uwu`.",
+              "",
+              "## Maintenance",
+              "",
+              "- Maintainer: **Luckez**",
+              "- Upstream: **HatsuneMikuUwU/cloudstream-extensions-uwu**",
+              "- Original provider authorship remains credited to **Miku** unless a provider is substantially modified by this fork.",
+              "- The `builds` branch is generated from this fork and contains the CloudStream plugin artefacts.",
+              "",
+              "## CloudStream repository",
+              "",
+              "Use the fork's `repo.json` as the repository manifest.",
+              "",
+              "## Attribution",
+              "",
+              "This fork preserves the upstream Git history and original author attribution. Changes made specifically for this fork are maintained by Luckez.",
+              "",
+          ]
+          Path("README.md").write_text("\n".join(readme_lines), encoding="utf-8")
+          PY
+
+          git diff --check
+
+      - name: Commit Stage 1 identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          git add repo.json build.gradle.kts README.md .github/workflows/build.yml
+
+          if git diff --staged --quiet; then
+            echo "Stage 1 identity is already applied."
+          else
+            git commit -m "Bootstrap Yiha fork identity [skip ci]"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+
+      - name: Build fork plugins
+        env:
+          DUBBINDO_PASSWORD: ${{ secrets.DUBBINDO_PASS }}
+          DUBBINDO_USERNAME: ${{ secrets.DUBBINDO_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew make makePluginsJson
+
+      - name: Verify generated manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("build/plugins.json")
+          if not path.is_file():
+              raise SystemExit("build/plugins.json was not generated.")
+
+          plugins = json.loads(path.read_text(encoding="utf-8"))
+          if not isinstance(plugins, list) or not plugins:
+              raise SystemExit("plugins.json is empty or invalid.")
+
+          expected_raw = (
+              "https://raw.githubusercontent.com/"
+              "Luckez12/cloudstream-extensions-yiha/builds/"
+          )
+          expected_repo = "https://github.com/Luckez12/cloudstream-extensions-yiha"
+
+          bad_urls = []
+          bad_repos = []
+
+          for plugin in plugins:
+              url = str(plugin.get("url", ""))
+              repo = str(plugin.get("repositoryUrl", ""))
+
+              if not url.startswith(expected_raw):
+                  bad_urls.append((plugin.get("name"), url))
+
+              if repo != expected_repo:
+                  bad_repos.append((plugin.get("name"), repo))
+
+          if bad_urls:
+              raise SystemExit(f"Generated plugin URLs are not using the fork: {bad_urls[:5]}")
+
+          if bad_repos:
+              raise SystemExit(f"Generated repositoryUrl is not using the fork: {bad_repos[:5]}")
+
+          print(f"Verified {len(plugins)} plugin entries.")
+          PY
+
+      - name: Prepare clean build artefacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="${RUNNER_TEMP}/yiha-builds"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          find . -path '*/build/*.cs3' -type f -exec cp {} "$OUT/" \;
+          find . -path '*/build/*.jar' -type f -exec cp {} "$OUT/" \;
+          cp build/plugins.json "$OUT/plugins.json"
+
+          CS3_COUNT="$(find "$OUT" -maxdepth 1 -name '*.cs3' -type f | wc -l)"
+          if [ "$CS3_COUNT" -eq 0 ]; then
+            echo "::error::No .cs3 artefacts were produced."
+            exit 1
+          fi
+
+          echo "Prepared $CS3_COUNT .cs3 artefacts."
+          ls -lah "$OUT"
+
+      - name: Replace builds branch with clean artefact branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="${RUNNER_TEMP}/yiha-builds"
+
+          git checkout --orphan yiha-clean-builds
+          git rm -rf . >/dev/null 2>&1 || true
+
+          cp "$OUT"/* .
+
+          git add .
+          git commit -m "Yiha build ${GITHUB_SHA}"
+          git push origin HEAD:builds --force
+
+      - name: Final verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f plugins.json
+          test "$(find . -maxdepth 1 -name '*.cs3' -type f | wc -l)" -gt 0
+          echo "Yiha Stage 1 bootstrap completed successfully."
