@@ -50,42 +50,50 @@ jobs:
 
           gradle_path = Path("build.gradle.kts")
           gradle = gradle_path.read_text(encoding="utf-8")
-          old_repo = (
-              'setRepo(System.getenv("GITHUB_REPOSITORY") ?: '
-              '"https://github.com/HatsuneMikuUwU/cloudstream-extensions-uwu")'
-          )
-          new_repo = (
-              'setRepo(System.getenv("GITHUB_REPOSITORY") ?: '
-              '"https://github.com/Luckez12/cloudstream-extensions-yiha")'
-          )
 
-          if old_repo in gradle:
-              gradle = gradle.replace(old_repo, new_repo)
-          elif new_repo not in gradle:
-              raise SystemExit("Could not locate the expected setRepo() line.")
+          upstream = "https://github.com/HatsuneMikuUwU/cloudstream-extensions-uwu"
+          fork = "https://github.com/Luckez12/cloudstream-extensions-yiha"
+
+          target_line = f'setRepo(System.getenv("GITHUB_REPOSITORY") ?: "{upstream}")'
+          replacement = f'setRepo(System.getenv("GITHUB_REPOSITORY") ?: "{fork}")'
+
+          if target_line in gradle:
+              gradle = gradle.replace(target_line, replacement, 1)
+          elif replacement not in gradle:
+              raise SystemExit("Could not locate the expected setRepo() configuration.")
 
           if 'authors = listOf("Miku")' not in gradle:
               raise SystemExit("Expected upstream Miku authorship line was not found.")
+
           if 'namespace = "com.miku"' not in gradle:
               raise SystemExit("Expected upstream namespace was not found.")
 
           gradle_path.write_text(gradle, encoding="utf-8")
 
           workflow_path = Path(".github/workflows/build.yml")
-          build_workflow = workflow_path.read_text(encoding="utf-8")
+          lines = workflow_path.read_text(encoding="utf-8").splitlines()
 
-          jar_copy = '          cp **/build/*.jar ${{ github.workspace }}/builds/ || true\n'
-          cs3_copy = '          cp **/build/*.cs3 ${{ github.workspace }}/builds/\n'
+          has_jar_copy = any("cp **/build/*.jar" in line for line in lines)
+          cs3_indexes = [
+              i for i, line in enumerate(lines)
+              if "cp **/build/*.cs3" in line
+          ]
 
-          if jar_copy not in build_workflow:
-              if cs3_copy not in build_workflow:
-                  raise SystemExit("Could not locate the .cs3 copy step in build.yml.")
-              build_workflow = build_workflow.replace(
-                  cs3_copy,
-                  cs3_copy + jar_copy,
-              )
+          if not has_jar_copy:
+              if len(cs3_indexes) != 1:
+                  raise SystemExit(
+                      f"Expected exactly one .cs3 copy command, found {len(cs3_indexes)}."
+                  )
 
-          workflow_path.write_text(build_workflow, encoding="utf-8")
+              i = cs3_indexes[0]
+              cs3_line = lines[i]
+              jar_line = cs3_line.replace("*.cs3", "*.jar") + " || true"
+              lines.insert(i + 1, jar_line)
+
+          workflow_path.write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8",
+          )
 
           readme_lines = [
               "# Yiha Extensions",
@@ -96,19 +104,19 @@ jobs:
               "",
               "- Maintainer: **Luckez**",
               "- Upstream: **HatsuneMikuUwU/cloudstream-extensions-uwu**",
-              "- Original provider authorship remains credited to **Miku** unless a provider is substantially modified by this fork.",
-              "- The `builds` branch is generated from this fork and contains the CloudStream plugin artefacts.",
-              "",
-              "## CloudStream repository",
-              "",
-              "Use the fork's `repo.json` as the repository manifest.",
+              "- Original provider authorship remains credited to the original authors.",
+              "- The `builds` branch is generated from this fork and contains CloudStream plugin artefacts.",
               "",
               "## Attribution",
               "",
-              "This fork preserves the upstream Git history and original author attribution. Changes made specifically for this fork are maintained by Luckez.",
+              "This fork preserves upstream Git history and author attribution.",
+              "Changes made specifically for this fork are maintained by **Luckez**.",
               "",
           ]
-          Path("README.md").write_text("\n".join(readme_lines), encoding="utf-8")
+          Path("README.md").write_text(
+              "\n".join(readme_lines),
+              encoding="utf-8",
+          )
           PY
 
           git diff --check
@@ -159,11 +167,11 @@ jobs:
           import json
           from pathlib import Path
 
-          path = Path("build/plugins.json")
-          if not path.is_file():
+          manifest = Path("build/plugins.json")
+          if not manifest.is_file():
               raise SystemExit("build/plugins.json was not generated.")
 
-          plugins = json.loads(path.read_text(encoding="utf-8"))
+          plugins = json.loads(manifest.read_text(encoding="utf-8"))
           if not isinstance(plugins, list) or not plugins:
               raise SystemExit("plugins.json is empty or invalid.")
 
@@ -173,34 +181,37 @@ jobs:
           )
           expected_repo = "https://github.com/Luckez12/cloudstream-extensions-yiha"
 
-          bad_urls = []
-          bad_repos = []
+          errors = []
 
           for plugin in plugins:
+              name = plugin.get("name", "<unknown>")
               url = str(plugin.get("url", ""))
-              repo = str(plugin.get("repositoryUrl", ""))
+              repository_url = str(plugin.get("repositoryUrl", ""))
 
               if not url.startswith(expected_raw):
-                  bad_urls.append((plugin.get("name"), url))
+                  errors.append(f"{name}: wrong cs3 URL: {url}")
 
-              if repo != expected_repo:
-                  bad_repos.append((plugin.get("name"), repo))
+              if repository_url != expected_repo:
+                  errors.append(
+                      f"{name}: wrong repositoryUrl: {repository_url}"
+                  )
 
-          if bad_urls:
-              raise SystemExit(f"Generated plugin URLs are not using the fork: {bad_urls[:5]}")
+              jar_url = plugin.get("jarUrl")
+              if jar_url and not str(jar_url).startswith(expected_raw):
+                  errors.append(f"{name}: wrong jar URL: {jar_url}")
 
-          if bad_repos:
-              raise SystemExit(f"Generated repositoryUrl is not using the fork: {bad_repos[:5]}")
+          if errors:
+              raise SystemExit("\n".join(errors[:20]))
 
           print(f"Verified {len(plugins)} plugin entries.")
           PY
 
-      - name: Prepare clean build artefacts
+      - name: Collect clean build artefacts
         shell: bash
         run: |
           set -euo pipefail
 
-          OUT="${RUNNER_TEMP}/yiha-builds"
+          OUT="${RUNNER_TEMP}/yiha-build-output"
           rm -rf "$OUT"
           mkdir -p "$OUT"
 
@@ -214,29 +225,88 @@ jobs:
             exit 1
           fi
 
-          echo "Prepared $CS3_COUNT .cs3 artefacts."
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          out = Path(os.environ["RUNNER_TEMP"]) / "yiha-build-output"
+          plugins = json.loads((out / "plugins.json").read_text(encoding="utf-8"))
+
+          missing = []
+          for plugin in plugins:
+              name = plugin.get("name", "<unknown>")
+
+              url = str(plugin.get("url", ""))
+              cs3_name = url.rsplit("/", 1)[-1]
+              if cs3_name and not (out / cs3_name).is_file():
+                  missing.append(f"{name}: missing {cs3_name}")
+
+              jar_url = plugin.get("jarUrl")
+              if jar_url:
+                  jar_name = str(jar_url).rsplit("/", 1)[-1]
+                  if jar_name and not (out / jar_name).is_file():
+                      missing.append(f"{name}: missing {jar_name}")
+
+          if missing:
+              raise SystemExit("\n".join(missing[:20]))
+
+          print("All manifest artefacts are present.")
+          PY
+
+          echo "Prepared ${CS3_COUNT} .cs3 artefacts."
           ls -lah "$OUT"
 
-      - name: Replace builds branch with clean artefact branch
+      - name: Replace builds branch with clean artefact tree
         shell: bash
         run: |
           set -euo pipefail
 
-          OUT="${RUNNER_TEMP}/yiha-builds"
+          OUT="${RUNNER_TEMP}/yiha-build-output"
+          WORKTREE="${RUNNER_TEMP}/yiha-builds-worktree"
 
-          git checkout --orphan yiha-clean-builds
-          git rm -rf . >/dev/null 2>&1 || true
+          rm -rf "$WORKTREE"
 
+          git fetch origin builds
+          git worktree add --detach "$WORKTREE" origin/builds
+
+          cd "$WORKTREE"
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          git rm -rf .
           cp "$OUT"/* .
 
-          git add .
+          git add -f plugins.json *.cs3
+          if compgen -G "*.jar" > /dev/null; then
+            git add -f *.jar
+          fi
+
           git commit -m "Yiha build ${GITHUB_SHA}"
           git push origin HEAD:builds --force
 
-      - name: Final verification
+      - name: Final local verification
         shell: bash
         run: |
           set -euo pipefail
-          test -f plugins.json
-          test "$(find . -maxdepth 1 -name '*.cs3' -type f | wc -l)" -gt 0
+
+          WORKTREE="${RUNNER_TEMP}/yiha-builds-worktree"
+
+          test -f "$WORKTREE/plugins.json"
+          test "$(find "$WORKTREE" -maxdepth 1 -name '*.cs3' -type f | wc -l)" -gt 0
+
+          EXTRA="$(find "$WORKTREE" -mindepth 1 -maxdepth 1 \
+            ! -name '.git' \
+            ! -name 'plugins.json' \
+            ! -name '*.cs3' \
+            ! -name '*.jar' \
+            -print)"
+
+          if [ -n "$EXTRA" ]; then
+            echo "::error::Unexpected files remain in builds branch:"
+            echo "$EXTRA"
+            exit 1
+          fi
+
           echo "Yiha Stage 1 bootstrap completed successfully."
