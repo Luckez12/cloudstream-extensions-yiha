@@ -1,0 +1,164 @@
+name: Yiha Add Ninja To Provider Names
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yiha-provider-name-ninja
+  cancel-in-progress: false
+
+jobs:
+  patch-build-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Add ninja suffix to provider names
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          roots = sorted(Path(".").glob("*Provider/src/main/kotlin"))
+          if not roots:
+              raise SystemExit("No provider source directories found.")
+
+          pattern = re.compile(
+              r'(^\s*override\s+var\s+name\s*=\s*")([^"\n]+)(")',
+              re.MULTILINE,
+          )
+
+          changed_files = []
+          changed_names = []
+
+          for root in roots:
+              for path in sorted(root.rglob("*.kt")):
+                  text = path.read_text(encoding="utf-8")
+
+                  def repl(match):
+                      original = match.group(2).strip()
+                      if original.endswith("🥷"):
+                          return match.group(0)
+
+                      updated = f"{original} 🥷"
+                      changed_names.append(
+                          (str(path), original, updated)
+                      )
+                      return (
+                          match.group(1)
+                          + updated
+                          + match.group(3)
+                      )
+
+                  new_text = pattern.sub(repl, text)
+
+                  if new_text != text:
+                      path.write_text(new_text, encoding="utf-8")
+                      changed_files.append(str(path))
+
+          if not changed_names:
+              print("All provider names already have the ninja suffix.")
+          else:
+              print(f"Updated {len(changed_names)} provider name declarations:")
+              for path, old, new in changed_names:
+                  print(f"  {old} -> {new}  [{path}]")
+
+          print(f"Changed files: {len(changed_files)}")
+          PY
+
+          git diff --check
+          git diff -- '*.kt'
+
+      - name: Verify name changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          pattern = re.compile(
+              r'^\s*override\s+var\s+name\s*=\s*"([^"\n]+)"',
+              re.MULTILINE,
+          )
+
+          found = []
+          missing = []
+
+          for root in sorted(Path(".").glob("*Provider/src/main/kotlin")):
+              for path in sorted(root.rglob("*.kt")):
+                  text = path.read_text(encoding="utf-8")
+                  for name in pattern.findall(text):
+                      found.append((str(path), name))
+                      if not name.strip().endswith("🥷"):
+                          missing.append((str(path), name))
+
+          if not found:
+              raise SystemExit("No override var name declarations found.")
+
+          if missing:
+              lines = "\n".join(
+                  f"{path}: {name}" for path, name in missing[:30]
+              )
+              raise SystemExit(
+                  "Some provider names are still missing the ninja suffix:\n"
+                  + lines
+              )
+
+          print(f"Verified {len(found)} provider name declarations.")
+          PY
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+
+      - name: Build all providers
+        env:
+          DUBBINDO_PASSWORD: ${{ secrets.DUBBINDO_PASS }}
+          DUBBINDO_USERNAME: ${{ secrets.DUBBINDO_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew make makePluginsJson
+
+      - name: Commit provider name changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          git add -- '*Provider/src/main/kotlin/**/*.kt'
+
+          if git diff --staged --quiet; then
+            echo "No provider name changes to commit."
+          else
+            git commit -m "Add ninja suffix to provider names"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "All provider names now end with 🥷 and the repository build passed."
+          echo "Run the normal Build workflow once to publish the updated extensions."
