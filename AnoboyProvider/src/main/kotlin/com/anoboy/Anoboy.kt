@@ -12,7 +12,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class Anoboy : MainAPI() {
-    override var mainUrl = "https://ww1.anoboy.boo"
+    override var mainUrl = "https://anoboy.quest"
     override var name = "AnoBoy"
     override val hasMainPage = true
     override var lang = "id"
@@ -162,9 +162,9 @@ class Anoboy : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
 
-        val title = document.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim().orEmpty()
+        val title = document.selectFirst("div.pagetitle h1, h1.entry-title, h2.entry-title")?.text()?.trim().orEmpty()
         val poster = document
-            .selectFirst("div.column-three-fourth > img, div.column-content > img, div.bigcontent img, div.entry-content img")
+            .selectFirst("div.sisi.entry-content img, div.column-three-fourth > img, div.column-content > img, div.bigcontent img, div.entry-content img, div.sisi img")
             ?.getImageAttr()
             ?.let { fixUrlNull(it) }
 
@@ -173,11 +173,15 @@ class Anoboy : MainAPI() {
                 ?.text()
                 ?.trim()
                 ?.ifBlank { null }
-                ?: document.select("div.entry-content p").joinToString("\n") { it.text() }
+                ?: document.selectFirst("div.contentdeks, span.entry-content[itemprop=description]")
+                    ?.text()
+                    ?.trim()
+                    ?.ifBlank { null }
+                ?: document.select("div.entry-content p, div.sisi.entry-content p").joinToString("\n") { it.text() }
             )
             .trim()
 
-        val tableRows = document.select("div.unduhan table tr")
+        val tableRows = document.select("div.unduhan table tr, div.contenttable table tr, div.contentdeks + div table tr")
         fun getTableValue(label: String): String? {
             return tableRows.firstOrNull {
                 it.selectFirst("th")?.text()?.contains(label, true) == true
@@ -228,7 +232,22 @@ class Anoboy : MainAPI() {
 
         val castList = emptyList<ActorData>()
 
-        val episodeElements = document.select("div.singlelink ul.lcp_catlist li a, div.eplister ul li a")
+        // Series pages list episodes as a:has(div.amv); skip this when page is already a player (has mirrors)
+        val isPlayerPage = document.selectFirst("iframe#mediaplayer, #fplay a[data-video], a#allmiror[data-video]") != null
+        val episodeElements = if (isPlayerPage) {
+            document.select("div.singlelink ul.lcp_catlist li a, div.eplister ul li a")
+        } else {
+            document.select(
+                "div.singlelink ul.lcp_catlist li a, div.eplister ul li a, " +
+                    "div.column-three-fourth a[href]:has(div.amv), " +
+                    "a[href]:has(div.amv)"
+            ).filter { el ->
+                val href = el.attr("href").lowercase()
+                !el.parents().hasClass("side_home") &&
+                    (href.contains("episode") || href.contains("/ep-") ||
+                        el.selectFirst("h3.ibox1, h3.ibox")?.text()?.contains("Episode", true) == true)
+            }
+        }
         val seasonHeaders = document.select("div.hq")
 
         fun normalizeTitle(raw: String): String {
@@ -332,6 +351,7 @@ class Anoboy : MainAPI() {
                     name = if (cleanedTitle.isBlank()) "Episode $episodeNumber" else cleanedTitle
                     episode = episodeNumber
                     if (seasonNum != null) this.season = seasonNum
+                    this.posterUrl = poster
                 }
             }
 
@@ -443,10 +463,29 @@ class Anoboy : MainAPI() {
                     .add(resolvedUrl to cleanedTitle)
             }
 
+            // Collect direct host links (mp4upload, gofile, etc.) as extra sources for the collapsed episode
+            val downloadHostUrls = doc.select("div.download a.udl[href], div.download a[href], .ud a.udl[href]")
+                .mapNotNull { a ->
+                    val href = a.attr("href").trim()
+                    if (href.startsWith("http") &&
+                        !href.equals("none", true) &&
+                        (href.contains("mp4upload", true) ||
+                            href.contains("gofile", true) ||
+                            href.contains("yourupload", true) ||
+                            href.contains("streamtape", true) ||
+                            href.contains("filemoon", true) ||
+                            href.contains("dood", true))
+                    ) fixUrl(href) else null
+                }
+                .distinct()
+
             return episodesByNumber
                 .toSortedMap()
                 .mapNotNull { (episodeNumber, entries) ->
-                    val urls = entries.map { it.first }.distinct()
+                    var urls = entries.map { it.first }.distinct()
+                    if (shouldCollapseToSingleEpisode && downloadHostUrls.isNotEmpty()) {
+                        urls = (urls + downloadHostUrls).distinct()
+                    }
                     val title = entries.map { it.second }.firstOrNull { it.isNotBlank() }
                         ?: "Episode $episodeNumber"
                     if (urls.isEmpty()) return@mapNotNull null
@@ -458,6 +497,7 @@ class Anoboy : MainAPI() {
                     newEpisode(encodeEpisodeData(pageReferer, data)) {
                         name = title
                         episode = episodeNumber
+                        this.posterUrl = poster
                     }
                 }
         }
@@ -487,6 +527,7 @@ class Anoboy : MainAPI() {
                         name = if (cleanedTitle.isBlank()) "Episode $episodeNumber" else cleanedTitle
                         episode = episodeNumber
                         if (seasonNum != null) this.season = seasonNum
+                        this.posterUrl = poster
                     }
                 }
         }
@@ -567,13 +608,21 @@ class Anoboy : MainAPI() {
         }
 
         val tracker = APIHolder.getTracker(altTitles, TrackerType.getTypes(type), year, true)
+        val ids = resolveAnimeIds(altTitles, type, year, malIdFromPage ?: tracker?.malId, aniIdFromPage ?: tracker?.aniId?.toIntOrNull())
+
+        // api.ani.zip: English synopsis (falls back to the site synopsis)
+        val animeMetaData = fetchAniZipMeta(ids.malId, ids.aniId)
+        val apiPlot = animeMetaData?.description?.replace(Regex("<.*?>"), "")?.takeIf { it.isNotBlank() }
+            ?: animeMetaData?.episodes?.get("1")?.overview?.takeIf { it.isNotBlank() }
+            ?: fetchAniListPlot(ids.malId, ids.aniId)
+        val finalPlot = if (!apiPlot.isNullOrBlank()) apiPlot else description
 
         return if (finalEpisodes.isNotEmpty()) {
             newAnimeLoadResponse(title, url, type) {
                 posterUrl = tracker?.image ?: poster
                 backgroundPosterUrl = tracker?.cover
                 this.year = year
-                this.plot = description
+                this.plot = finalPlot
                 this.tags = tags
                 showStatus = status
                 this.recommendations = recommendations
@@ -583,15 +632,15 @@ class Anoboy : MainAPI() {
                 addActors(actors)
                 if (castList.isNotEmpty()) this.actors = castList
                 addTrailer(trailer)
-                addMalId(malIdFromPage ?: tracker?.malId)
-                addAniListId(aniIdFromPage ?: tracker?.aniId?.toIntOrNull())
+                addMalId(ids.malId)
+                addAniListId(ids.aniId)
             }
         } else {
             newMovieLoadResponse(title, url, type, url) {
                 posterUrl = tracker?.image ?: poster
                 backgroundPosterUrl = tracker?.cover
                 this.year = year
-                this.plot = description
+                this.plot = finalPlot
                 this.tags = tags
                 this.recommendations = recommendations
                 this.duration = duration ?: 0
@@ -599,8 +648,8 @@ class Anoboy : MainAPI() {
                 addActors(actors)
                 if (castList.isNotEmpty()) this.actors = castList
                 addTrailer(trailer)
-                addMalId(malIdFromPage ?: tracker?.malId)
-                addAniListId(aniIdFromPage ?: tracker?.aniId?.toIntOrNull())
+                addMalId(ids.malId)
+                addAniListId(ids.aniId)
             }
         }
     }
@@ -685,6 +734,7 @@ class Anoboy : MainAPI() {
                 lower.contains("/uploads/adsbatch") ||
                 lower.contains("/uploads/acbatch") ||
                 lower.contains("/uploads/yupbatch") ||
+                lower.contains("/uploads/yup/") ||
                 lower.contains("/uploads/stream/embed.php") ||
                 lower.contains("yourupload.com/embed/") ||
                 lower.contains("yourupload.com/watch/") ||
@@ -704,6 +754,7 @@ class Anoboy : MainAPI() {
                     "a[href*=\"/uploads/acbatch.php\"], " +
                     "a[href*=\"/uploads/adsbatch\"], " +
                     "a[href*=\"/uploads/yupbatch\"], " +
+                    "a[href*=\"/uploads/yup/\"], " +
                     "a[href*=\"blogger.com/video.g\"], " +
                     "a[href*=\"blogger.googleusercontent.com\"]"
             ).forEach { queueUrl(it.attr("href"), baseUrl) }
@@ -726,7 +777,7 @@ class Anoboy : MainAPI() {
                 .forEach { queueUrl(it.attr("href"), baseUrl) }
 
             val bloggerRegex = Regex("""https?://(?:www\.)?blogger\.com/video\.g\?[^"'<\s]+""", RegexOption.IGNORE_CASE)
-            val batchRegex = Regex("""/uploads/(?:adsbatch[^"'\s]+|yupbatch[^"'\s]+|acbatch[^"'\s]+|stream/embed\.php\?[^"'\s]+)""", RegexOption.IGNORE_CASE)
+            val batchRegex = Regex("""/uploads/(?:adsbatch[^"'\s]+|yupbatch[^"'\s]+|yup/[^"'\s]+|acbatch[^"'\s]+|stream/embed\.php\?[^"'\s]+)""", RegexOption.IGNORE_CASE)
             val yourUploadRegex = Regex("""https?://(?:www\.)?yourupload\.com/(?:embed|watch)/[^"'<\s]+""", RegexOption.IGNORE_CASE)
             doc.select("script").forEach { script ->
                 val scriptData = script.data()
@@ -747,9 +798,11 @@ class Anoboy : MainAPI() {
             if (lower.contains("blogger.com/video.g")) return false
             if (lower.endsWith(".mp4") || lower.endsWith(".m3u8")) return false
             return lower.contains("anoboy.boo") ||
+                lower.contains("anoboy.quest") ||
                 lower.contains("/uploads/") ||
                 lower.contains("adsbatch") ||
-                lower.contains("yupbatch")
+                lower.contains("yupbatch") ||
+                lower.contains("/uploads/yup/")
         }
 
         if (!isMulti && isDirectResolvableUrl(requestData)) {
@@ -970,6 +1023,7 @@ class Anoboy : MainAPI() {
             val isLegacyMirrorPage = lower.contains("/uploads/adsbatch") ||
                 lower.contains("/uploads/acbatch") ||
                 lower.contains("/uploads/yupbatch") ||
+                lower.contains("/uploads/yup/") ||
                 lower.contains("/uploads/stream/embed.php")
             if (!isLegacyMirrorPage) return false
 
@@ -1004,15 +1058,30 @@ class Anoboy : MainAPI() {
             }
 
             var resolvedAny = false
+            // Prefer yourupload quality buttons from YUp picker (240/360/480/720)
+            val handledYourUpload = mutableSetOf<String>()
+            doc.select("a.link[href*=yourupload.com], a[href*=yourupload.com/embed/], a[href*=yourupload.com/watch/]")
+                .forEach { anchor ->
+                    val href = resolveUrl(anchor.attr("href"), pageUrl) ?: return@forEach
+                    if (!handledYourUpload.add(href)) return@forEach
+                    if (loadExtractor(href, pageUrl, subtitleCallback, callbackWrapper)) {
+                        resolvedAny = true
+                    }
+                }
+
             resolvedCandidates.forEach { candidate ->
                 when {
                     candidate.contains("blogger.com/video.g", true) ||
                         candidate.contains("blogger.googleusercontent.com", true) -> {
                         if (emitBloggerDirectLinks(candidate, pageUrl)) resolvedAny = true
                     }
-
+                    candidate.contains("yourupload.com", true) && handledYourUpload.contains(candidate) -> {
+                        // already handled above
+                    }
                     candidate != pageUrl -> {
-                        loadExtractor(candidate, pageUrl, subtitleCallback, callbackWrapper)
+                        if (loadExtractor(candidate, pageUrl, subtitleCallback, callbackWrapper)) {
+                            resolvedAny = true
+                        }
                     }
                 }
             }
@@ -1027,6 +1096,7 @@ class Anoboy : MainAPI() {
                 lower.contains("/uploads/adsbatch") ||
                     lower.contains("/uploads/acbatch") ||
                     lower.contains("/uploads/yupbatch") ||
+                    lower.contains("/uploads/yup/") ||
                     lower.contains("/uploads/stream/embed.php")
             }
             .forEach { resolveLegacyMirrorPage(it) }

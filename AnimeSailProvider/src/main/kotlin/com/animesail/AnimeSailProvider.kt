@@ -1,9 +1,5 @@
 package com.animesail
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.DeserializationFeature
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addKitsuId
@@ -17,12 +13,11 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class AnimeSailProvider : MainAPI() {
-    override var mainUrl = "https://v1.animesail.xyz"
+    override var mainUrl = "https://anisail.com"
     override var name = "AnimeSail"
     override val hasMainPage = true
     override var lang = "id"
@@ -35,10 +30,6 @@ class AnimeSailProvider : MainAPI() {
     )
 
     companion object {
-        private val mapper: ObjectMapper by lazy {
-            ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-        }
-
         fun getType(t: String): TvType {
             return if (t.contains("OVA", true) || t.contains("Special")) TvType.OVA
             else if (t.contains("Movie", true)) TvType.AnimeMovie
@@ -54,15 +45,17 @@ class AnimeSailProvider : MainAPI() {
         }
     }
 
-    private val turnstileInterceptor = TurnstileInterceptor("_as_turnstile")
-
     private suspend fun request(url: String, ref: String? = null): NiceResponse {
         return app.get(
             url,
-            interceptor = turnstileInterceptor,
             headers = mapOf(
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+            ),
+            cookies = mapOf(
+                "_as_ipin_ct" to "ID",
+                "_as_ipin_tz" to "Asia/Jakarta",
+                "_as_ipin_lc" to "id-ID"
             ),
             referer = ref
         )
@@ -86,10 +79,11 @@ class AnimeSailProvider : MainAPI() {
         return if (uri.contains("/anime/")) {
             uri
         } else {
-            var title = uri.substringAfter("$mainUrl/")
+            var title = uri.substringAfter("$mainUrl/").removeSuffix("/")
             title = when {
-                (title.contains("-episode")) && !(title.contains("-movie")) -> title.substringBefore("-episode")
-                (title.contains("-movie")) -> title.substringBefore("-movie")
+                title.contains("-episode-") -> title.substringBefore("-episode")
+                Regex("-movie-\\d+$", RegexOption.IGNORE_CASE).containsMatchIn(title) ->
+                    title.replace(Regex("-movie-\\d+$", RegexOption.IGNORE_CASE), "-movie")
                 else -> title
             }
             "$mainUrl/anime/$title"
@@ -97,7 +91,7 @@ class AnimeSailProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): AnimeSearchResponse {
-        val rawHref = fixUrlNull(this.selectFirst("a")?.attr("href")).toString()
+        val rawHref = fixUrlNull(this.selectFirst("a")?.attr("href")).orEmpty()
         val href = getProperAnimeLink(rawHref)
 
         val rawTitle = this.selectFirst(".tt > h2")?.text() ?: ""
@@ -134,8 +128,11 @@ class AnimeSailProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val document = request(url).document
 
-        val title = document.selectFirst("h1.entry-title")?.text().toString()
-            .replace("Subtitle Indonesia", "").trim()
+        val title = (
+            document.selectFirst("h1.entry-title")?.text()
+                ?: document.selectFirst("meta[property=og:title]")?.attr("content")
+                ?: document.title()
+            ).replace("Subtitle Indonesia", "").trim()
         val poster = document.selectFirst("div.entry-content > img")?.attr("src")
         val type = getType(document.select("tbody th:contains(Tipe)").next().text().lowercase())
         val year = document.select("tbody th:contains(Dirilis)").next().text().trim().toIntOrNull()
@@ -145,16 +142,17 @@ class AnimeSailProvider : MainAPI() {
         val durationText = document.select("tbody th:contains(Durasi)").next().text().trim()
 
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
-        val malId = tracker?.malId
+        val ids = resolveAnimeIds(listOf(title), type, year, tracker?.malId, tracker?.aniId?.toIntOrNull())
+        val malId = ids.malId
+        val aniId = ids.aniId
 
         var animeMetaData: MetaAnimeData? = null
         var tmdbid: Int? = null
         var kitsuid: String? = null
 
-        if (malId != null) {
+        if (malId != null || aniId != null) {
             try {
-                val syncMetaData = app.get("https://api.ani.zip/mappings?mal_id=$malId").text
-                animeMetaData = parseAnimeData(syncMetaData)
+                animeMetaData = fetchAniZipMeta(malId, aniId)
                 tmdbid = animeMetaData?.mappings?.themoviedbId
                 kitsuid = animeMetaData?.mappings?.kitsuId
             } catch (e: Exception) {
@@ -185,11 +183,7 @@ class AnimeSailProvider : MainAPI() {
             val metaEp = if (episodeKey != null) animeMetaData?.episodes?.get(episodeKey) else null
 
             val epOverview = metaEp?.overview
-            val finalOverview = if (!epOverview.isNullOrBlank()) {
-                epOverview
-            } else {
-                "Synopsis not yet available."
-            }
+            val finalOverview = epOverview?.takeIf { it.isNotBlank() }
 
             newEpisode(link) {
                 this.name = if (type == TvType.AnimeMovie) {
@@ -200,7 +194,7 @@ class AnimeSailProvider : MainAPI() {
 
                 this.episode = episodeNum
                 this.score = Score.from10(metaEp?.rating)
-                this.posterUrl = metaEp?.image ?: animeMetaData?.images?.firstOrNull()?.url ?: ""
+                this.posterUrl = metaEp?.image?.takeIf { it.isNotBlank() } ?: animeMetaData?.images?.firstOrNull()?.url ?: backgroundposter ?: tracker?.image ?: poster ?: ""
                 this.description = finalOverview
                 this.addDate(metaEp?.airDateUtc)
                 this.runTime = metaEp?.runtime
@@ -208,7 +202,9 @@ class AnimeSailProvider : MainAPI() {
         }.reversed()
 
         val apiDescription = animeMetaData?.description?.replace(Regex("<.*?>"), "")
-        val rawPlot = apiDescription ?: animeMetaData?.episodes?.get("1")?.overview
+        val rawPlot = apiDescription?.takeIf { it.isNotBlank() }
+            ?: animeMetaData?.episodes?.get("1")?.overview?.takeIf { it.isNotBlank() }
+            ?: fetchAniListPlot(malId, aniId)
 
         val finalPlot = if (!rawPlot.isNullOrBlank()) {
             rawPlot
@@ -229,7 +225,7 @@ class AnimeSailProvider : MainAPI() {
             this.plot = finalPlot
             this.tags = tagsList
             addMalId(malId)
-            addAniListId(tracker?.aniId?.toIntOrNull())
+            addAniListId(aniId)
             try { addKitsuId(kitsuid) } catch (_: Throwable) {}
         }
     }
@@ -248,7 +244,10 @@ class AnimeSailProvider : MainAPI() {
                 val encodedData = element.attr("data-em")
                 if (encodedData.isBlank()) return@safeApiCall
 
-                val iframe = fixUrl(Jsoup.parse(base64Decode(encodedData)).select("iframe").attr("src"))
+                val decodedHtml = base64Decode(encodedData)
+                    .replace("v1.animesail.xyz", mainUrl.substringAfter("://"))
+
+                val iframe = fixUrl(Jsoup.parse(decodedHtml).select("iframe").attr("src"))
                 if (iframe.contains("statistic") || iframe.isBlank()) return@safeApiCall
 
                 val rawText = element.text().trim()
@@ -397,114 +396,4 @@ class AnimeSailProvider : MainAPI() {
         return Regex("(\\d{3,4})[pP]").find(str)?.groupValues?.getOrNull(1)?.toIntOrNull()
             ?: Qualities.Unknown.value
     }
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaImage(
-        @JsonProperty("coverType") val coverType: String?,
-        @JsonProperty("url") val url: String?
-    )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaEpisode(
-        @JsonProperty("episode") val episode: String?,
-        @JsonProperty("airDateUtc") val airDateUtc: String?,
-        @JsonProperty("runtime") val runtime: Int?,
-        @JsonProperty("image") val image: String?,
-        @JsonProperty("title") val title: Map<String, String>?,
-        @JsonProperty("overview") val overview: String?,
-        @JsonProperty("rating") val rating: String?,
-        @JsonProperty("finaleType") val finaleType: String?
-    )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaAnimeData(
-        @JsonProperty("titles") val titles: Map<String, String>?,
-        @JsonProperty("description") val description: String?,
-        @JsonProperty("images") val images: List<MetaImage>?,
-        @JsonProperty("episodes") val episodes: Map<String, MetaEpisode>?,
-        @JsonProperty("mappings") val mappings: MetaMappings? = null
-    )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaMappings(
-        @JsonProperty("themoviedb_id") val themoviedbId: Int? = null,
-        @JsonProperty("kitsu_id") val kitsuId: String? = null
-    )
-
-    private fun parseAnimeData(jsonString: String): MetaAnimeData? {
-        return try {
-            mapper.readValue(jsonString, MetaAnimeData::class.java)
-        } catch (_: Exception) {
-            null
-        }
-    }
-}
-
-suspend fun fetchTmdbLogoUrl(
-    tmdbAPI: String,
-    apiKey: String,
-    type: TvType,
-    tmdbId: Int?,
-    appLangCode: String?
-): String? {
-    if (tmdbId == null) return null
-
-    val url = if (type == TvType.AnimeMovie)
-        "$tmdbAPI/movie/$tmdbId/images?api_key=$apiKey"
-    else
-        "$tmdbAPI/tv/$tmdbId/images?api_key=$apiKey"
-
-    val json = runCatching { JSONObject(app.get(url).text) }.getOrNull() ?: return null
-    val logos = json.optJSONArray("logos") ?: return null
-    if (logos.length() == 0) return null
-
-    val lang = appLangCode?.trim()?.lowercase()
-
-    fun path(o: JSONObject) = o.optString("file_path")
-    fun isSvg(o: JSONObject) = path(o).endsWith(".svg", true)
-    fun urlOf(o: JSONObject) = "https://image.tmdb.org/t/p/w500${path(o)}"
-
-    var svgFallback: JSONObject? = null
-
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue
-        val p = path(logo)
-        if (p.isBlank()) continue
-
-        val l = logo.optString("iso_639_1").trim().lowercase()
-        if (l == lang) {
-            if (!isSvg(logo)) return urlOf(logo)
-            if (svgFallback == null) svgFallback = logo
-        }
-    }
-    svgFallback?.let { return urlOf(it) }
-
-    var best: JSONObject? = null
-    var bestSvg: JSONObject? = null
-
-    fun voted(o: JSONObject) = o.optDouble("vote_average", 0.0) > 0 && o.optInt("vote_count", 0) > 0
-    fun better(a: JSONObject?, b: JSONObject): Boolean {
-        if (a == null) return true
-        val aAvg = a.optDouble("vote_average", 0.0)
-        val aCnt = a.optInt("vote_count", 0)
-        val bAvg = b.optDouble("vote_average", 0.0)
-        val bCnt = b.optInt("vote_count", 0)
-        return bAvg > aAvg || (bAvg == aAvg && bCnt > aCnt)
-    }
-
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue
-        if (!voted(logo)) continue
-
-        if (isSvg(logo)) {
-            if (better(bestSvg, logo)) bestSvg = logo
-        } else {
-            if (better(best, logo)) best = logo
-        }
-    }
-
-    best?.let { return urlOf(it) }
-    bestSvg?.let { return urlOf(it) }
-
-    return null
 }

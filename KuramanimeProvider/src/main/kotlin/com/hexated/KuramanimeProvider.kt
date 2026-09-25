@@ -3,20 +3,23 @@ package com.hexated
 import app.cash.quickjs.QuickJs
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addKitsuId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicBoolean
 
 class KuramanimeProvider : MainAPI() {
-    override var mainUrl = "https://v18.kuramanime.ing"
+    override var mainUrl = "https://v20.kuramanime.ing"
     override var name = "Kuramanime"
     override val hasQuickSearch = true
     override val hasMainPage = true
@@ -164,90 +167,300 @@ class KuramanimeProvider : MainAPI() {
         }
 
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
+        val ids = resolveAnimeIds(listOf(title), type, year, tracker?.malId, tracker?.aniId?.toIntOrNull())
+        val malId = ids.malId
+        val aniId = ids.aniId
 
-        return newAnimeLoadResponse(title, url, type) {
-            engName = title
-            posterUrl = tracker?.image ?: poster
-            backgroundPosterUrl = tracker?.cover
-            this.year = year
-            addEpisodes(DubStatus.Subbed, episodes.distinctBy { it.data })
-            showStatus = status
-            plot = description
-            this.tags = tags
-            this.recommendations = recommendations
-            addMalId(tracker?.malId)
-            addAniListId(tracker?.aniId?.toIntOrNull())
-        }
-    }
+        // api.ani.zip: titles, description, fanart and per-episode metadata
+        val animeMetaData = fetchAniZipMeta(malId, aniId)
+        val tmdbId = animeMetaData?.mappings?.themoviedbId
+        val kitsuId = animeMetaData?.mappings?.kitsuId
 
-    private suspend fun invokeLocalSource(url: String, server: String, headers: Map<String, String>, authScriptUrl: String, refererUrl: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        val request = app.post(url, data = mapOf("authorization" to getAuth(authScriptUrl, refererUrl)), headers = headers, cookies = cookies)
-        delay(2000)
-        val document = request.document
-        document.select("video#player > source").map {
-            val link = fixUrl(it.attr("src"))
-            val quality = it.attr("size").toIntOrNull()
-            callback.invoke(newExtractorLink(fixTitle(server), fixTitle(server), link, INFER_TYPE) {
-                this.quality = quality ?: Qualities.Unknown.value
-            })
-        }
-        if (server == "kuramadrive") {
-            document.select("div#animeDownloadLink a").amap {
-                loadExtractor(it.attr("href"), "$mainUrl/", subtitleCallback, callback)
+        // api.themoviedb.org: title logo
+        val tmdbLogoUrl = fetchTmdbLogoUrl(
+            tmdbAPI = "https://api.themoviedb.org/3",
+            apiKey = "98ae14df2b8d8f8f8136499daf79f0e0",
+            type = type,
+            tmdbId = tmdbId,
+            appLangCode = "en"
+        )
+
+        val backgroundPoster = animeMetaData?.images?.find { it.coverType == "Fanart" }?.url ?: tracker?.cover
+
+        val finalEpisodes = episodes.distinctBy { it.data }.map { ep ->
+            val episodeNum = ep.episode ?: if (type == TvType.AnimeMovie) 1 else null
+            val metaEp = episodeNum?.let { animeMetaData?.episodes?.get(it.toString()) }
+            val epOverview = metaEp?.overview
+
+            newEpisode(ep.data) {
+                this.name = if (type == TvType.AnimeMovie) {
+                    animeMetaData?.titles?.get("en") ?: animeMetaData?.titles?.get("ja") ?: ep.name
+                } else {
+                    metaEp?.title?.get("en") ?: metaEp?.title?.get("ja") ?: ep.name
+                }
+                this.episode = episodeNum
+                this.score = Score.from10(metaEp?.rating)
+                this.posterUrl = metaEp?.image?.takeIf { it.isNotBlank() } ?: animeMetaData?.images?.firstOrNull()?.url ?: backgroundPoster ?: tracker?.image ?: poster
+                this.description = epOverview?.takeIf { it.isNotBlank() }
+                this.addDate(metaEp?.airDateUtc)
+                this.runTime = metaEp?.runtime
             }
         }
+
+        val apiDescription = animeMetaData?.description?.replace(Regex("<.*?>"), "")
+        val rawPlot = apiDescription?.takeIf { it.isNotBlank() }
+            ?: animeMetaData?.episodes?.get("1")?.overview?.takeIf { it.isNotBlank() }
+            ?: fetchAniListPlot(malId, aniId)
+        val finalPlot = if (!rawPlot.isNullOrBlank()) rawPlot else description
+
+        return newAnimeLoadResponse(title, url, type) {
+            engName = animeMetaData?.titles?.get("en") ?: title
+            japName = animeMetaData?.titles?.get("ja") ?: animeMetaData?.titles?.get("x-jat")
+            posterUrl = tracker?.image ?: poster
+            backgroundPosterUrl = backgroundPoster
+            try { this.logoUrl = tmdbLogoUrl } catch (_: Throwable) {}
+            this.year = year
+            addEpisodes(DubStatus.Subbed, finalEpisodes)
+            showStatus = status
+            plot = finalPlot
+            this.tags = tags
+            this.recommendations = recommendations
+            addMalId(malId)
+            addAniListId(aniId)
+            try { addKitsuId(kitsuId) } catch (_: Throwable) {}
+        }
     }
 
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+    private data class StreamSession(
+        val csrf: String,
+        val token: String,
+        val assets: Assets,
+        val authScriptUrl: String,
+    )
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val found = AtomicBoolean(false)
+        val trackedCallback: (ExtractorLink) -> Unit = {
+            found.set(true)
+            callback(it)
+        }
+
         val req = app.get(data)
-        val res = req.document
+        val doc = req.document
         cookies = req.cookies
 
-        val token = res.selectFirst("meta[name=csrf-token]")?.attr("content") ?: return false
-        val dataKps = res.selectFirst("[data-kk]")?.attr("data-kk") ?: return false
-        val tokenAuthUrl = res.selectFirst("input#tokenAuthJs")?.attr("value")
-        val authScriptUrl = if (tokenAuthUrl != null) "$mainUrl$tokenAuthUrl" else "$mainUrl/storage/leviathan.js?v=${System.currentTimeMillis()}"
+        var authError: ErrorLoadingException? = null
 
-        val assets = getAssets(dataKps)
-        var headers = mapOf(
-            "X-CSRF-TOKEN" to token,
-            "X-Fuck-ID" to "${assets.MIX_AUTH_KEY}:${assets.MIX_AUTH_TOKEN}",
+        try {
+            val session = createStreamSession(doc)
+            if (session != null) {
+                val servers = doc.select("select#changeServer option")
+                    .map { it.attr("value").trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .ifEmpty { listOf("kuramadrive") }
+
+                servers.amap { server ->
+                    try {
+                        loadServer(data, server, session, subtitleCallback, trackedCallback)
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        if (e is ErrorLoadingException) authError = e
+                    }
+                    Unit
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            if (e is ErrorLoadingException) authError = e
+        }
+
+        if (!found.get()) {
+            doc.getElementsByTag("iframe").forEach { iframe ->
+                val src = iframe.attr("src").ifBlank { null } ?: return@forEach
+                val fullSrc = if (src.startsWith("//")) "https:$src" else src
+                loadExtractor(fixUrl(fullSrc), data, subtitleCallback, trackedCallback)
+            }
+        }
+
+        if (!found.get()) authError?.let { throw it }
+        return found.get()
+    }
+
+    private suspend fun createStreamSession(doc: Document): StreamSession? {
+        val csrf = doc.selectFirst("meta[name=csrf-token]")?.attr("content")?.ifBlank { null }
+            ?: return null
+        val kk = doc.selectFirst("[data-kk]")?.attr("data-kk")?.ifBlank { null }
+            ?: Regex("data-kk=\"([^\"]+)\"").find(doc.outerHtml())?.groupValues?.getOrNull(1)
+            ?: return null
+
+        val assets = getAssets(kk)
+        if (assets.authRouteParam.isBlank() || assets.pageTokenKey.isBlank() || assets.streamServerKey.isBlank()) {
+            return null
+        }
+
+        val tokenAuthUrl = doc.selectFirst("input#tokenAuthJs")?.attr("value")?.ifBlank { null }
+        val authScriptUrl = if (tokenAuthUrl != null) fixUrl(tokenAuthUrl)
+        else "$mainUrl/storage/leviathan.js?v=${System.currentTimeMillis()}"
+
+        val token = fetchPageToken(csrf, assets) ?: return null
+        return StreamSession(csrf, token, assets, authScriptUrl)
+    }
+
+    private suspend fun fetchPageToken(csrf: String, assets: Assets): String? {
+        val headers = mapOf(
+            "X-Fuck-ID" to assets.fuckId,
             "X-Request-ID" to randomId(),
             "X-Request-Index" to "0",
+            "X-CSRF-TOKEN" to csrf,
             "X-Requested-With" to "XMLHttpRequest",
         )
 
-        val tokenRes = app.get("$mainUrl/${assets.MIX_PREFIX_AUTH_ROUTE_PARAM}${assets.MIX_AUTH_ROUTE_PARAM}", headers = headers, cookies = cookies)
-        val tokenKey = tokenRes.text
-        cookies = tokenRes.cookies
+        val routes = listOf(
+            "assets/${assets.authRouteParam}",
+            "${assets.prefixAuthRoute}${assets.authRouteParam}",
+        ).distinct()
 
-        headers = mapOf("X-CSRF-TOKEN" to token, "X-Requested-With" to "XMLHttpRequest")
+        for (route in routes) {
+            val res = try {
+                app.get("$mainUrl/$route", headers = headers, cookies = cookies)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                continue
+            }
+            val text = res.text.trim()
+            if (res.isSuccessful && text.isNotBlank() && !text.startsWith("<")) {
+                cookies = cookies + res.cookies
+                return text
+            }
+        }
+        return null
+    }
 
-        res.select("select#changeServer option").amap { source ->
-            val server = source.attr("value")
-            val link = "$data?${assets.MIX_PAGE_TOKEN_KEY}=$tokenKey&${assets.MIX_STREAM_SERVER_KEY}=$server"
-            if (server.contains(Regex("(?i)kuramadrive|archive"))) {
-                invokeLocalSource(link, server, headers, authScriptUrl, data, subtitleCallback, callback)
-            } else {
-                val request = app.post(link, data = mapOf("authorization" to getAuth(authScriptUrl, data)), referer = data, headers = headers, cookies = cookies)
-                delay(2000)
-                request.document.select("div.iframe-container iframe").attr("src").let { videoUrl ->
-                    loadExtractor(fixUrl(videoUrl), "$mainUrl/", subtitleCallback, callback)
+    private suspend fun loadServer(
+        data: String,
+        server: String,
+        session: StreamSession,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val assets = session.assets
+        val link = "$data?${assets.pageTokenKey}=${session.token}&${assets.streamServerKey}=$server&page=1"
+
+        val postDoc = app.post(
+            link,
+            headers = mapOf(
+                "Accept" to "text/html, */*; q=0.01",
+                "X-Requested-With" to "XMLHttpRequest",
+                "X-CSRF-TOKEN" to session.csrf,
+                "Origin" to mainUrl,
+                "Referer" to data,
+            ),
+            data = mapOf("authorization" to getAuth(session.authScriptUrl, data)),
+            cookies = cookies
+        ).document
+
+        if (server.contains(Regex("(?i)kuramadrive|archive"))) {
+            invokeLocalSource(postDoc, server, subtitleCallback, callback)
+        } else {
+            val iframeSrc = postDoc.select("div.iframe-container iframe").attr("src")
+                .ifBlank { postDoc.select("iframe").attr("src") }
+            if (iframeSrc.isNotBlank()) {
+                loadExtractor(fixUrl(iframeSrc), "$mainUrl/", subtitleCallback, callback)
+            }
+        }
+    }
+
+    private fun qualityFromSize(size: Int?): Int {
+        return when (size) {
+            1080 -> Qualities.P1080.value
+            720 -> Qualities.P720.value
+            480 -> Qualities.P480.value
+            360 -> Qualities.P360.value
+            else -> size ?: Qualities.Unknown.value
+        }
+    }
+
+    private fun qualityFromText(text: String): Int {
+        return when {
+            text.contains("1080") -> Qualities.P1080.value
+            text.contains("720") -> Qualities.P720.value
+            text.contains("480") -> Qualities.P480.value
+            text.contains("360") -> Qualities.P360.value
+            else -> Qualities.Unknown.value
+        }
+    }
+
+    private suspend fun invokeLocalSource(
+        document: Document,
+        server: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        document.select("video#player source[src]").forEach { source ->
+            val src = source.attr("src").ifBlank { null } ?: return@forEach
+            val size = source.attr("size").toIntOrNull()
+            callback.invoke(
+                newExtractorLink(
+                    fixTitle(server),
+                    fixTitle(server),
+                    fixUrl(src),
+                    INFER_TYPE
+                ) {
+                    this.quality = qualityFromSize(size)
+                    this.referer = mainUrl
+                }
+            )
+        }
+
+        if (server == "kuramadrive") {
+            val downloads = mutableListOf<Pair<Int, String>>()
+            var currentQuality = Qualities.Unknown.value
+            document.selectFirst("#animeDownloadLink")?.children()?.forEach { element ->
+                if (element.tagName() == "h6") {
+                    currentQuality = qualityFromText(element.text())
+                } else {
+                    element.select("a[href]").forEach { a ->
+                        val href = a.attr("href").ifBlank { null } ?: return@forEach
+                        downloads.add(currentQuality to href)
+                    }
+                }
+            }
+
+            downloads.distinctBy { it.second }.amap { (linkQuality, href) ->
+                val pdId = Regex("pixeldrain\\.\\w+/[du]/(\\w+)").find(href)?.groupValues?.getOrNull(1)
+                if (pdId != null) {
+                    callback.invoke(
+                        newExtractorLink("PixelDrain", "PixelDrain", "https://pixeldrain.com/api/file/$pdId") {
+                            this.quality = linkQuality
+                            this.referer = mainUrl
+                        }
+                    )
+                } else {
+                    loadExtractor(href, "$mainUrl/", subtitleCallback, callback)
                 }
             }
         }
-        return true
     }
 
-    private suspend fun getAssets(bpjs: String?): Assets {
-        val env = app.get("$mainUrl/assets/js/$bpjs.js").text
+    private suspend fun getAssets(bpjs: String): Assets {
+        val cfg = app.get("$mainUrl/assets/js/$bpjs.js").text
+
+        fun cfgValue(key: String): String =
+            Regex("\\b$key\\s*:\\s*['\"]([^'\"]+)['\"]").find(cfg)?.groupValues?.getOrNull(1) ?: ""
+
         return Assets(
-            env.substringAfter("MIX_PREFIX_AUTH_ROUTE_PARAM: '").substringBefore("',"),
-            env.substringAfter("MIX_AUTH_ROUTE_PARAM: '").substringBefore("',"),
-            env.substringAfter("MIX_AUTH_KEY: '").substringBefore("',"),
-            env.substringAfter("MIX_AUTH_TOKEN: '").substringBefore("',"),
-            env.substringAfter("MIX_PAGE_TOKEN_KEY: '").substringBefore("',"),
-            env.substringAfter("MIX_STREAM_SERVER_KEY: '").substringBefore("',")
+            prefixAuthRoute = cfgValue("MIX_PREFIX_AUTH_ROUTE_PARAM"),
+            authRouteParam = cfgValue("MIX_AUTH_ROUTE_PARAM"),
+            authKey = cfgValue("MIX_AUTH_KEY"),
+            authToken = cfgValue("MIX_AUTH_TOKEN"),
+            pageTokenKey = cfgValue("MIX_PAGE_TOKEN_KEY"),
+            streamServerKey = cfgValue("MIX_STREAM_SERVER_KEY"),
         )
     }
 
@@ -331,11 +544,13 @@ class KuramanimeProvider : MainAPI() {
     }
 
     data class Assets(
-        val MIX_PREFIX_AUTH_ROUTE_PARAM: String?,
-        val MIX_AUTH_ROUTE_PARAM: String?,
-        val MIX_AUTH_KEY: String?,
-        val MIX_AUTH_TOKEN: String?,
-        val MIX_PAGE_TOKEN_KEY: String?,
-        val MIX_STREAM_SERVER_KEY: String?,
-    )
+        val prefixAuthRoute: String,
+        val authRouteParam: String,
+        val authKey: String,
+        val authToken: String,
+        val pageTokenKey: String,
+        val streamServerKey: String,
+    ) {
+        val fuckId: String get() = "$authKey:$authToken"
+    }
 }

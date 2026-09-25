@@ -1,8 +1,6 @@
 package com.nontonanimeid
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addKitsuId
@@ -11,16 +9,15 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.amap
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
-import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLEncoder
 
 class NontonAnimeIDProvider : MainAPI() {
-    override var mainUrl = "https://s12.nontonanimeid.boats"
+    override var mainUrl = "https://s13.nontonanimeid.boats"
     override var name = "NontonAnimeID"
-    override val hasQuickSearch = false
     override val hasMainPage = true
     override var lang = "id"
     override val hasDownloadSupport = true
@@ -64,7 +61,9 @@ class NontonAnimeIDProvider : MainAPI() {
             request.data.replaceFirst("?", "page/$page/?")
         }
 
-        val document = app.get(pageUrl).document
+        val req = app.get(pageUrl)
+        mainUrl = getBaseUrl(req.url)
+        val document = req.document
         
         val home = document.select("article.animeseries, .animeseries, a.as-anime-card").mapNotNull {
             it.toSearchResult()
@@ -94,8 +93,10 @@ class NontonAnimeIDProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val link = "$mainUrl/?s=$query"
-        val document = app.get(link).document
+        val link = "$mainUrl/?s=${URLEncoder.encode(query, "UTF-8")}"
+        val req = app.get(link)
+        mainUrl = getBaseUrl(req.url)
+        val document = req.document
 
         return document.select("article.animeseries, .animeseries, .result > ul > li").mapNotNull {
             it.toSearchResult()
@@ -151,16 +152,17 @@ class NontonAnimeIDProvider : MainAPI() {
         val trailer = document.selectFirst("a.trailerbutton")?.attr("href")
 
         val tracker = APIHolder.getTracker(listOf(title), TrackerType.getTypes(type), year, true)
-        val malId = tracker?.malId
+        val ids = resolveAnimeIds(listOf(title), type, year, tracker?.malId, tracker?.aniId?.toIntOrNull())
+        val malId = ids.malId
+        val aniId = ids.aniId
 
         var animeMetaData: MetaAnimeData? = null
         var tmdbid: Int? = null
         var kitsuid: String? = null
 
-        if (malId != null) {
+        if (malId != null || aniId != null) {
             try {
-                val syncMetaData = app.get("https://api.ani.zip/mappings?mal_id=$malId").text
-                animeMetaData = parseAnimeData(syncMetaData)
+                animeMetaData = fetchAniZipMeta(malId, aniId)
                 tmdbid = animeMetaData?.mappings?.themoviedbId
                 kitsuid = animeMetaData?.mappings?.kitsuId
             } catch (e: Exception) {}
@@ -197,7 +199,7 @@ class NontonAnimeIDProvider : MainAPI() {
             val id = document.select("input[name=series_id]").attr("value")
             val numEp =
                 document.selectFirst(".latestepisode > a")?.text()?.replace(Regex("\\D"), "")
-                    .toString()
+                    .let { if (it.isNullOrBlank()) "1000" else it }
             Jsoup.parse(
                 app.post(
                     url = "$mainUrl/wp-admin/admin-ajax.php",
@@ -210,7 +212,7 @@ class NontonAnimeIDProvider : MainAPI() {
                 ).parsed<EpResponse>().content
             ).select("li").map {
                 val episode = Regex("Episode\\s?(\\d+)").find(
-                    it.selectFirst("a")?.text().toString()
+                    it.selectFirst("a")?.text().orEmpty()
                 )?.groupValues?.getOrNull(1) ?: it.selectFirst("a")?.text()
                 val link = fixUrl(it.selectFirst("a")!!.attr("href"))
                 newEpisode(link) { this.episode = episode?.toIntOrNull() }
@@ -218,7 +220,7 @@ class NontonAnimeIDProvider : MainAPI() {
         } else {
             document.select("ul.misha_posts_wrap2 > li, .lstepi > li, .episodelist > ul > li").map {
                 val episode = Regex("Episode\\s?(\\d+)").find(
-                    it.selectFirst("a")?.text().toString()
+                    it.selectFirst("a")?.text().orEmpty()
                 )?.groupValues?.getOrNull(1) ?: it.selectFirst("a")?.text()
                 val link = it.select("a").attr("href")
                 newEpisode(link) { this.episode = episode?.toIntOrNull() }
@@ -236,11 +238,7 @@ class NontonAnimeIDProvider : MainAPI() {
             val metaEp = if (episodeKey != null) animeMetaData?.episodes?.get(episodeKey) else null
 
             val epOverview = metaEp?.overview
-            val finalOverview = if (!epOverview.isNullOrBlank()) {
-                epOverview
-            } else {
-                "Synopsis not yet available."
-            }
+            val finalOverview = epOverview?.takeIf { it.isNotBlank() }
 
             ep.apply {
                 this.name = if (type == TvType.AnimeMovie) {
@@ -250,7 +248,7 @@ class NontonAnimeIDProvider : MainAPI() {
                 }
                 this.episode = episodeNum
                 this.score = Score.from10(metaEp?.rating)
-                this.posterUrl = metaEp?.image ?: animeMetaData?.images?.firstOrNull()?.url ?: ""
+                this.posterUrl = metaEp?.image?.takeIf { it.isNotBlank() } ?: animeMetaData?.images?.firstOrNull()?.url ?: backgroundposter ?: tracker?.image ?: poster ?: ""
                 this.description = finalOverview
                 this.addDate(metaEp?.airDateUtc)
                 this.runTime = metaEp?.runtime
@@ -262,7 +260,9 @@ class NontonAnimeIDProvider : MainAPI() {
         }
 
         val apiDescription = animeMetaData?.description?.replace(Regex("<.*?>"), "")
-        val rawPlot = apiDescription ?: animeMetaData?.episodes?.get("1")?.overview
+        val rawPlot = apiDescription?.takeIf { it.isNotBlank() }
+            ?: animeMetaData?.episodes?.get("1")?.overview?.takeIf { it.isNotBlank() }
+            ?: fetchAniListPlot(malId, aniId)
         
         val finalPlot = if (!rawPlot.isNullOrBlank()) {
             rawPlot
@@ -285,7 +285,7 @@ class NontonAnimeIDProvider : MainAPI() {
             this.tags = tags
             this.recommendations = recommendations
             addMalId(malId)
-            addAniListId(tracker?.aniId?.toIntOrNull())
+            addAniListId(aniId)
             try { addKitsuId(kitsuid) } catch(_:Throwable){}
         }
 
@@ -419,115 +419,4 @@ class NontonAnimeIDProvider : MainAPI() {
         @JsonProperty("found_posts") val found_posts: Int?,
         @JsonProperty("content") val content: String
     )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaImage(
-        @JsonProperty("coverType") val coverType: String?,
-        @JsonProperty("url") val url: String?
-    )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaEpisode(
-        @JsonProperty("episode") val episode: String?,
-        @JsonProperty("airDateUtc") val airDateUtc: String?,
-        @JsonProperty("runtime") val runtime: Int?,
-        @JsonProperty("image") val image: String?,
-        @JsonProperty("title") val title: Map<String, String>?,
-        @JsonProperty("overview") val overview: String?,
-        @JsonProperty("rating") val rating: String?,
-        @JsonProperty("finaleType") val finaleType: String?
-    )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaAnimeData(
-        @JsonProperty("titles") val titles: Map<String, String>?,
-        @JsonProperty("description") val description: String?,
-        @JsonProperty("images") val images: List<MetaImage>?,
-        @JsonProperty("episodes") val episodes: Map<String, MetaEpisode>?,
-        @JsonProperty("mappings") val mappings: MetaMappings? = null
-    )
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    data class MetaMappings(
-        @JsonProperty("themoviedb_id") val themoviedbId: Int? = null,
-        @JsonProperty("kitsu_id") val kitsuId: String? = null
-    )
-
-    private fun parseAnimeData(jsonString: String): MetaAnimeData? {
-        return try {
-            val objectMapper = ObjectMapper()
-            objectMapper.readValue(jsonString, MetaAnimeData::class.java)
-        } catch (_: Exception) {
-            null
-        }
-    }
-}
-
-suspend fun fetchTmdbLogoUrl(
-    tmdbAPI: String,
-    apiKey: String,
-    type: TvType,
-    tmdbId: Int?,
-    appLangCode: String?
-): String? {
-    if (tmdbId == null) return null
-
-    val url = if (type == TvType.AnimeMovie)
-        "$tmdbAPI/movie/$tmdbId/images?api_key=$apiKey"
-    else
-        "$tmdbAPI/tv/$tmdbId/images?api_key=$apiKey"
-
-    val json = runCatching { JSONObject(app.get(url).text) }.getOrNull() ?: return null
-    val logos = json.optJSONArray("logos") ?: return null
-    if (logos.length() == 0) return null
-
-    val lang = appLangCode?.trim()?.lowercase()
-
-    fun path(o: JSONObject) = o.optString("file_path")
-    fun isSvg(o: JSONObject) = path(o).endsWith(".svg", true)
-    fun urlOf(o: JSONObject) = "https://image.tmdb.org/t/p/w500${path(o)}"
-
-    var svgFallback: JSONObject? = null
-
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue
-        val p = path(logo)
-        if (p.isBlank()) continue
-
-        val l = logo.optString("iso_639_1").trim().lowercase()
-        if (l == lang) {
-            if (!isSvg(logo)) return urlOf(logo)
-            if (svgFallback == null) svgFallback = logo
-        }
-    }
-    svgFallback?.let { return urlOf(it) }
-
-    var best: JSONObject? = null
-    var bestSvg: JSONObject? = null
-
-    fun voted(o: JSONObject) = o.optDouble("vote_average", 0.0) > 0 && o.optInt("vote_count", 0) > 0
-    fun better(a: JSONObject?, b: JSONObject): Boolean {
-        if (a == null) return true
-        val aAvg = a.optDouble("vote_average", 0.0)
-        val aCnt = a.optInt("vote_count", 0)
-        val bAvg = b.optDouble("vote_average", 0.0)
-        val bCnt = b.optInt("vote_count", 0)
-        return bAvg > aAvg || (bAvg == aAvg && bCnt > aCnt)
-    }
-
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue
-        if (!voted(logo)) continue
-
-        if (isSvg(logo)) {
-            if (better(bestSvg, logo)) bestSvg = logo
-        } else {
-            if (better(best, logo)) best = logo
-        }
-    }
-
-    best?.let { return urlOf(it) }
-    bestSvg?.let { return urlOf(it) }
-
-    return null
 }
