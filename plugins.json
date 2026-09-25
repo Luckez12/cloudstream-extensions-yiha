@@ -22,28 +22,6 @@
         "fileHash": "sha256-45151087653d2a071c82409e64d3f5de1f4a70c2c72abdd0ae4fabc4bca69546"
     },
     {
-        "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/AnichinProvider.cs3",
-        "status": 1,
-        "version": 2,
-        "name": "AnichinProvider",
-        "internalName": "AnichinProvider",
-        "authors": [
-            "Miku"
-        ],
-        "description": "Anichin \u2014 Streaming Donghua Subtitle Indonesia",
-        "fileSize": 34703,
-        "repositoryUrl": "https://github.com/Luckez12/cloudstream-extensions-yiha",
-        "language": "id",
-        "tvTypes": [
-            "Anime",
-            "AnimeMovie",
-            "Cartoon"
-        ],
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://anichin.club&size=%size%",
-        "apiVersion": 1,
-        "fileHash": "sha256-a75958e7b626c3bf24024fae30ed303923b91480a663e175656ad700bb084a16"
-    },
-    {
         "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/AnimeSailProvider.cs3",
         "status": 1,
         "version": 6,
@@ -53,7 +31,7 @@
             "Miku"
         ],
         "description": "AnimeSail \u2014 Streaming Anime, Donghua Subtitle Indonesia",
-        "fileSize": 35446,
+        "fileSize": 36946,
         "repositoryUrl": "https://github.com/Luckez12/cloudstream-extensions-yiha",
         "language": "id",
         "tvTypes": [
@@ -63,29 +41,7 @@
         ],
         "iconUrl": "https://aghanim.xyz/wp-content/themes/animesail/assets/images/ico.png",
         "apiVersion": 1,
-        "fileHash": "sha256-747e01c15a6e56f7c1709367541627dd33671de20b7b998b88b4a0d84dad1848"
-    },
-    {
-        "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/AnimexinProvider.cs3",
-        "status": 1,
-        "version": 1,
-        "name": "AnimexinProvider",
-        "internalName": "AnimexinProvider",
-        "authors": [
-            "Miku"
-        ],
-        "description": "Animexin \u2014 Streaming Donghua Subtitle Indonesia",
-        "fileSize": 14790,
-        "repositoryUrl": "https://github.com/Luckez12/cloudstream-extensions-yiha",
-        "language": "id",
-        "tvTypes": [
-            "AnimeMovie",
-            "Anime",
-            "Cartoon"
-        ],
-        "iconUrl": "https://animexin.dev/wp-content/uploads/2020/06/animexinv1.png",
-        "apiVersion": 1,
-        "fileHash": "sha256-022eac4cbddbff8fce317b43b40ac082d8edb0809ede22a1573674edf6a34ca9"
+        "fileHash": "sha256-cd3e88525b5bd8cd5d6e74ba83ee4da5b97c9074dc2ef563b6acfba52c937978"
     },
     {
         "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/AnoboyProvider.cs3",
@@ -418,29 +374,6 @@
         "fileHash": "sha256-9e92e02935cb6678d6aab3175e99f8ece1aed9b33c48ceea9044612ffc13076b"
     },
     {
-        "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/MovieboxProvider.cs3",
-        "status": 1,
-        "version": 1,
-        "name": "MovieboxProvider",
-        "internalName": "MovieboxProvider",
-        "authors": [
-            "Miku"
-        ],
-        "description": "MovieBox \u2014 Streaming Movie Subtitle Indonesia",
-        "fileSize": 31395,
-        "repositoryUrl": "https://github.com/Luckez12/cloudstream-extensions-yiha",
-        "language": "id",
-        "tvTypes": [
-            "TvSeries",
-            "Movie",
-            "Anime",
-            "AsianDrama"
-        ],
-        "iconUrl": "https://movieboxph.app/wp-content/uploads/2025/11/Movie-Box-icon.webp",
-        "apiVersion": 1,
-        "fileHash": "sha256-05e1b811f2c30d8ab03ca1da5d6b8452607e19281bd89b297c8d3109e93130ef"
-    },
-    {
         "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/NekopoiProvider.cs3",
         "status": 1,
         "version": 3,
@@ -549,28 +482,6 @@
         "fileHash": "sha256-352925fc0af8640639736ed45645df80f2a911a56303d51234df342e281430c9"
     },
     {
-        "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/OppaDramaProvider.cs3",
-        "status": 1,
-        "version": 1,
-        "name": "OppaDramaProvider",
-        "internalName": "OppaDramaProvider",
-        "authors": [
-            "Miku"
-        ],
-        "description": "OppaDrama \u2014 Streaming Drama Korean, Movie and TV Series",
-        "fileSize": 25217,
-        "repositoryUrl": "https://github.com/Luckez12/cloudstream-extensions-yiha",
-        "language": "id",
-        "tvTypes": [
-            "AsianDrama",
-            "TvSeries",
-            "Movie"
-        ],
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://45.11.57.243&size=%size%",
-        "apiVersion": 1,
-        "fileHash": "sha256-09fc6e5bc0daeb820c4c83a3e3e6d0cc4b229bd427823c79855309427207eec1"
-    },
-    {
         "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/OtakudesuProvider.cs3",
         "status": 1,
         "version": 4,
@@ -591,27 +502,6 @@
         "iconUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRr-sfek8gXmLpcAppEpaYbUDVtndQbCm_boh1-E91QrmSvsw-2l3-s2JOP&s=10",
         "apiVersion": 1,
         "fileHash": "sha256-673141d6e8747ccb35a00610567d2058bb2093d886cd5359370ecba1fcb8efa0"
-    },
-    {
-        "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/PencuriMovieProvider.cs3",
-        "status": 1,
-        "version": 1,
-        "name": "PencuriMovieProvider",
-        "internalName": "PencuriMovieProvider",
-        "authors": [
-            "Miku"
-        ],
-        "description": "PencuriMovie \u2014 Streaming Movie and TV Series",
-        "fileSize": 15283,
-        "repositoryUrl": "https://github.com/Luckez12/cloudstream-extensions-yiha",
-        "language": "id",
-        "tvTypes": [
-            "Movie",
-            "TvSeries"
-        ],
-        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://ww03.pencurimovie.bond&size=%size%",
-        "apiVersion": 1,
-        "fileHash": "sha256-b30b532b04974a77d13eb1461bc46abe06182fa5564e72ce7e426885cf2d43e1"
     },
     {
         "url": "https://raw.githubusercontent.com/Luckez12/cloudstream-extensions-yiha/builds/SamehadakuProvider.cs3",
