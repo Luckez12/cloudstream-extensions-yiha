@@ -1,66 +1,85 @@
-name: Sync AlqanimeProvider
+name: Sync Common Folders from AnimeX
 
-# Run manually from the Actions tab. No scheduled or push triggers.
 on:
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# Prevent two sync jobs from updating the same branch at the same time.
 concurrency:
-  group: sync-alqanime-${{ github.ref }}
+  group: yiha-folder-sync-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   sync:
-    name: Sync upstream folder to Yiha
-    if: github.ref_type == 'branch'
+    # The Yiha source branch is master; never write into the builds branch.
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Yiha branch
+      - name: Checkout Yiha
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
           path: yiha
-          fetch-depth: 1
 
-      - name: Checkout AnimeX AlqanimeProvider only
+      - name: Checkout AnimeX upstream
         uses: actions/checkout@v4
         with:
           repository: HatsuneMikuUwU/AnimeX
           ref: master
           path: upstream
-          sparse-checkout: AlqanimeProvider
           persist-credentials: false
 
-      - name: Verify upstream folder exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -d upstream/AlqanimeProvider || {
-            echo 'ERROR: AlqanimeProvider not found in AnimeX master; nothing was changed.' >&2
-            exit 1
-          }
-
-      - name: Sync folder and commit only if changed
+      - name: Sync folders that exist in both repositories
         shell: bash
         run: |
           set -euo pipefail
 
-          # Mirror only this folder. Removed upstream files are removed locally too.
-          mkdir -p yiha/AlqanimeProvider
-          rsync -a --delete upstream/AlqanimeProvider/ yiha/AlqanimeProvider/
+          # Compare top-level directories tracked in each repository.
+          mapfile -t yiha_dirs < <(git -C yiha ls-tree -d --name-only HEAD)
+          mapfile -t upstream_dirs < <(git -C upstream ls-tree -d --name-only HEAD)
 
-          cd yiha
-          git add -A -- AlqanimeProvider
-          if git diff --cached --quiet -- AlqanimeProvider; then
-            echo 'AlqanimeProvider is already up to date. No commit needed.'
+          declare -A upstream_has=()
+          for folder in "${upstream_dirs[@]}"; do
+            upstream_has["$folder"]=1
+          done
+
+          matched=()
+          for folder in "${yiha_dirs[@]}"; do
+            [[ -n "${upstream_has[$folder]+yes}" ]] || continue
+
+            # Protect custom workflows and build infrastructure.
+            case "$folder" in
+              .github|.git|.gradle|.vscode|.idea|gradle|build|builds|node_modules)
+                continue
+                ;;
+              .*)
+                continue
+                ;;
+            esac
+
+            [[ -d "yiha/$folder" && -d "upstream/$folder" ]] || continue
+
+            # --delete makes each selected folder mirror upstream, including deletions.
+            rsync -a --checksum --delete -- "upstream/$folder/" "yiha/$folder/"
+            matched+=("$folder")
+            echo "Synced folder: $folder"
+          done
+
+          if (( ${#matched[@]} == 0 )); then
+            echo "No matching source folders to sync."
             exit 0
           fi
 
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Sync AlqanimeProvider from AnimeX master'
+          cd yiha
+          git add -A -- "${matched[@]}"
+
+          if git diff --cached --quiet; then
+            echo "All matching folders are already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: sync common source folders from AnimeX"
           git push origin "HEAD:${GITHUB_REF_NAME}"
