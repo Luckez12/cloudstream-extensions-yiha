@@ -1,6 +1,7 @@
 name: Build
 
 on:
+  workflow_dispatch:
   workflow_run:
     workflows:
       - Unzip
@@ -15,19 +16,56 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-${{ github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
+  group: yiha-build-publish
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Confirm source artifact or manual request
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - name: Check whether an uploaded ZIP was processed
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RESULT: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$SOURCE_RESULT" != 'success' ]]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+          else
+            # Deleting a ZIP manually can match the push path filter. Such a
+            # no-op Unzip run has no artifact and must not start a build.
+            count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "yiha-ready-source" and .expired == false)] | length')"
+            if (( count > 0 )); then
+              echo 'ready=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'No extracted source artifact; skipping Build.'
+              echo 'ready=false' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   build:
-    name: Build after successful Unzip
+    needs: prepare
+    name: Build (successful Unzip or manual)
     if: >-
-      ${{ github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.head_repository.full_name == github.repository &&
-          (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') }}
+      ${{ needs.prepare.outputs.ready == 'true' &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.head_repository.full_name == github.repository &&
+           github.event.workflow_run.event == 'push')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source from successful Unzip run
+        if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
           name: yiha-ready-source
@@ -35,14 +73,24 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
+      - name: Checkout selected branch for manual Build
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v7
+        with:
+          path: src
+          persist-credentials: false
+
       - name: Verify source commit and required files
         shell: bash
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
+          MANUAL_BUILD: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
-          test -f src/.source-commit
-          test "$(cat src/.source-commit)" = "$EXPECTED_SHA"
+          if [[ "$MANUAL_BUILD" != "true" ]]; then
+            test -f src/.source-commit
+            test "$(cat src/.source-commit)" = "$EXPECTED_SHA"
+          fi
           test -f src/gradlew
           test -f src/settings.gradle.kts
           test -f src/build.gradle.kts
@@ -123,7 +171,7 @@ jobs:
       - name: Publish CloudStream plugins
         shell: bash
         env:
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           rm -f builds/*.cs3 builds/*.jar
