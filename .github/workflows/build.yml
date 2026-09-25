@@ -71,9 +71,34 @@ jobs:
           set -euo pipefail
           sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
+      # JitPack's CloudStream Gradle plugin POM is missing in the failed run.
+      # Publish the upstream plugin from its source to Maven Local instead.
+      - name: Checkout official CloudStream Gradle plugin
+        uses: actions/checkout@v7
+        with:
+          repository: recloudstream/gradle
+          ref: master
+          path: cloudstream-gradle
+          persist-credentials: false
+
+      - name: Build and publish CloudStream Gradle plugin locally
+        working-directory: cloudstream-gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This is a temporary CI-only version; no upstream files are committed.
+          printf '\nversion = "yiha-local"\n' >> build.gradle.kts
+          chmod +x gradlew
+          ./gradlew --no-daemon publishToMavenLocal
+          plugin_dir="$HOME/.m2/repository/com/lagradost/cloudstream3/gradle/yiha-local"
+          test -s "$plugin_dir/gradle-yiha-local.jar"
+          test -s "$plugin_dir/gradle-yiha-local.pom"
+          echo "CloudStream Gradle plugin built locally: $plugin_dir"
+
       - name: Build CloudStream plugins
         working-directory: src
         env:
+          YIHA_LOCAL_CLOUDSTREAM_GRADLE: 'true'
           DUBBINDO_PASSWORD: ${{ secrets.DUBBINDO_PASS }}
           DUBBINDO_USERNAME: ${{ secrets.DUBBINDO_USER }}
         shell: bash
