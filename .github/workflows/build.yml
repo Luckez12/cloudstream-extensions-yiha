@@ -1,73 +1,119 @@
 name: Build
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 on:
-  push:
+  workflow_run:
+    workflows:
+      - Unzip
+    types:
+      - completed
     branches:
       - master
       - main
-    paths-ignore:
-      - '*.md'
-  workflow_dispatch:
 
 permissions:
+  actions: read
   contents: write
+
+concurrency:
+  group: build-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    name: Build after successful Unzip
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source
-        uses: actions/checkout@v7
+      - name: Download source from successful Unzip run
+        uses: actions/download-artifact@v4
         with:
-          path: "src"
+          name: yiha-ready-source
+          path: src
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
 
-      - name: Checkout Builds Branch
-        uses: actions/checkout@v7
-        with:
-          ref: "builds"
-          path: "builds"
-
-      - name: Clean old builds
+      - name: Verify source commit and required files
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          rm $GITHUB_WORKSPACE/builds/*.cs3 || true
-          rm $GITHUB_WORKSPACE/builds/*.jar || true
+          set -euo pipefail
+          test -f src/.source-commit
+          test "$(cat src/.source-commit)" = "$EXPECTED_SHA"
+          test -f src/gradlew
+          test -f src/settings.gradle.kts
+          test -f src/build.gradle.kts
+          test -f src/gradle/wrapper/gradle-wrapper.jar
+          echo "Building validated commit: $EXPECTED_SHA"
 
       - name: Setup JDK 21
         uses: actions/setup-java@v5
         with:
-          java-version: 21
           distribution: temurin
+          java-version: '21'
           cache: gradle
+          cache-dependency-path: |
+            src/**/*.gradle.kts
+            src/gradle/wrapper/gradle-wrapper.properties
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4.0.1
+        with:
+          # Do not request the removed legacy Android SDK package named 'tools'.
+          packages: 'platform-tools'
 
-      - name: Build Plugins
-        working-directory: ${{ github.workspace }}/src
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Build CloudStream plugins
+        working-directory: src
         env:
           DUBBINDO_PASSWORD: ${{ secrets.DUBBINDO_PASS }}
           DUBBINDO_USERNAME: ${{ secrets.DUBBINDO_USER }}
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew make makePluginsJson
-          cp **/build/*.cs3 ${{ github.workspace }}/builds/
-          cp build/plugins.json ${{ github.workspace }}/builds/
+          ./gradlew --no-daemon make makePluginsJson
+          test -s build/plugins.json
+          python3 -m json.tool build/plugins.json > /dev/null
+          if ! find . -type f -path '*/build/*.cs3' -print -quit | grep -q .; then
+            echo 'ERROR: Gradle produced no .cs3 files.' >&2
+            exit 1
+          fi
 
-      - name: Push builds
-        working-directory: ${{ github.workspace }}/builds
+      - name: Checkout builds branch
+        uses: actions/checkout@v7
+        with:
+          ref: builds
+          path: builds
+          persist-credentials: true
+
+      - name: Publish CloudStream plugins
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add .
-          
+          set -euo pipefail
+          rm -f builds/*.cs3 builds/*.jar
+          while IFS= read -r -d '' plugin; do
+            cp "$plugin" builds/
+          done < <(find src -type f -path '*/build/*.cs3' -print0)
+          cp src/build/plugins.json builds/plugins.json
+
+          cd builds
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.name 'github-actions[bot]'
+          git add -A
           if git diff --staged --quiet; then
-            echo "do not error if nothing to commit."
+            echo 'No build changes to publish.'
             exit 0
           fi
-          
-          git commit --amend -m "Build ${{ github.sha }}"
-          git push --force
+          git commit -m "Build $SOURCE_SHA"
+          git push origin HEAD:builds

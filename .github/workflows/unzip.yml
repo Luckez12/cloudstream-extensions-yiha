@@ -1,0 +1,97 @@
+name: Unzip
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unzip-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unzip:
+    name: Unzip and validate source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          path: src
+          persist-credentials: false
+
+      - name: Unzip archive or prepare existing source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ready-src
+
+          # A single ZIP at the repository root takes priority, if present.
+          mapfile -d '' archives < <(find src -maxdepth 1 -type f -iname '*.zip' -print0)
+          if (( ${#archives[@]} > 1 )); then
+            echo 'ERROR: More than one ZIP found at repository root.' >&2
+            exit 1
+          fi
+
+          if (( ${#archives[@]} == 1 )); then
+            archive="${archives[0]}"
+            echo "Checking archive: $archive"
+            unzip -tq "$archive"
+            mkdir -p "$RUNNER_TEMP/yiha-unpacked"
+            unzip -oq "$archive" -d "$RUNNER_TEMP/yiha-unpacked"
+
+            # Support both ZIP layouts: files at the root or inside a top-level folder.
+            mapfile -d '' roots < <(find "$RUNNER_TEMP/yiha-unpacked" \
+              -maxdepth 3 -type f -name settings.gradle.kts -print0)
+            if (( ${#roots[@]} != 1 )); then
+              echo 'ERROR: ZIP must contain exactly one project root with settings.gradle.kts.' >&2
+              exit 1
+            fi
+            source_dir="$(dirname "${roots[0]}")"
+            echo "Using extracted source: $source_dir"
+          else
+            echo 'No root-level ZIP found; repository already contains extracted sources.'
+            source_dir=src
+          fi
+
+          # Never transfer the Git checkout or other workflow definitions in the artifact.
+          rsync -a \
+            --exclude='/.git/' \
+            --exclude='/.github/' \
+            --exclude='/.gradle/' \
+            --exclude='build/' \
+            "$source_dir/" ready-src/
+
+          for required in gradlew settings.gradle.kts build.gradle.kts \
+            gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties; do
+            if [[ ! -f "ready-src/$required" ]]; then
+              echo "ERROR: Missing project file: $required" >&2
+              exit 1
+            fi
+          done
+
+          if ! find ready-src -mindepth 2 -maxdepth 2 -type f -name build.gradle.kts \
+            -print -quit | grep -q .; then
+            echo 'ERROR: No provider module found.' >&2
+            exit 1
+          fi
+
+          # Build must consume the exact commit validated in this workflow run.
+          printf '%s\n' "$GITHUB_SHA" > ready-src/.source-commit
+          echo 'Unzip/source validation succeeded.'
+
+      - name: Upload validated source for Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: yiha-ready-source
+          path: ready-src/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 3
