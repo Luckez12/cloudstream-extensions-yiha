@@ -1,0 +1,66 @@
+name: Sync AlqanimeProvider
+
+# Run manually from the Actions tab. No scheduled or push triggers.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Prevent two sync jobs from updating the same branch at the same time.
+concurrency:
+  group: sync-alqanime-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync upstream folder to Yiha
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Yiha branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          path: yiha
+          fetch-depth: 1
+
+      - name: Checkout AnimeX AlqanimeProvider only
+        uses: actions/checkout@v4
+        with:
+          repository: HatsuneMikuUwU/AnimeX
+          ref: master
+          path: upstream
+          sparse-checkout: AlqanimeProvider
+          persist-credentials: false
+
+      - name: Verify upstream folder exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d upstream/AlqanimeProvider || {
+            echo 'ERROR: AlqanimeProvider not found in AnimeX master; nothing was changed.' >&2
+            exit 1
+          }
+
+      - name: Sync folder and commit only if changed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Mirror only this folder. Removed upstream files are removed locally too.
+          mkdir -p yiha/AlqanimeProvider
+          rsync -a --delete upstream/AlqanimeProvider/ yiha/AlqanimeProvider/
+
+          cd yiha
+          git add -A -- AlqanimeProvider
+          if git diff --cached --quiet -- AlqanimeProvider; then
+            echo 'AlqanimeProvider is already up to date. No commit needed.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Sync AlqanimeProvider from AnimeX master'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
