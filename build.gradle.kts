@@ -5,6 +5,11 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 buildscript {
     repositories {
+        // The CI build publishes CloudStream's official Gradle plugin locally.
+        // Keep the original JitPack resolution for local developer builds.
+        if (System.getenv("YIHA_LOCAL_CLOUDSTREAM_GRADLE") == "true") {
+            mavenLocal()
+        }
         google()
         mavenCentral()
         maven("https://jitpack.io")
@@ -12,7 +17,13 @@ buildscript {
 
     dependencies {
         classpath("com.android.tools.build:gradle:9.1.1")
-        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+        classpath(
+            if (System.getenv("YIHA_LOCAL_CLOUDSTREAM_GRADLE") == "true") {
+                "com.lagradost.cloudstream3:gradle:yiha-local"
+            } else {
+                "com.github.recloudstream:gradle:-SNAPSHOT"
+            }
+        )
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.0")
     }
 }
